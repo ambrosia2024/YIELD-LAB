@@ -28,14 +28,13 @@ Install the dependencies as indicated at the [CY-BENCH](https://github.com/wur-a
 ```
 cd cybench
 git clone https://github.com/ambrosia2024/ANAND.git
-mv -r ANAND/* ./
+mv ANAND/* ./
 rm -rf ANAND
 ```
 
 ##### Step 4: Install project dependencies:
 ```
 conda env update --name CYP --file environment.yml --prune
-pip install -r requirements.txt
 ```
 
 ##### Step 5: Data Download
