@@ -16,7 +16,9 @@ conda activate CYP
 ##### 2.  Clone the CY-BENCH repository:
 ```
 git clone https://github.com/WUR-AI/AgML-CY-BENCH.git
-conda env update --name CYP --file environment.yml --prune
+pip install poetry
+cd AgML-CY-Bench
+poetry install
 ```
 
 Install the dependencies as indicated at the [CY-BENCH](https://github.com/wur-ai/agml-cy-bench) repository.
@@ -32,6 +34,7 @@ rm -rf crop_yield_prediction
 
 ##### Step 4: Install project dependencies:
 ```
+conda env update --name CYP --file environment.yml --prune
 pip install -r requirements.txt
 ```
 
