@@ -26,10 +26,10 @@ Install the dependencies as indicated at the [CY-BENCH](https://github.com/wur-a
 ##### Step 3: Clone this repository:
 
 ```
-cd AgML-CY-BENCH/cybench
-git clone https://github.com/your-username/crop_yield_prediction.git
-mv -r crop_yield_prediction/* ./
-rm -rf crop_yield_prediction
+cd cybench
+git clone https://github.com/your-username/ANAND.git
+mv -r ANAND/* ./
+rm -rf ANAND
 ```
 
 ##### Step 4: Install project dependencies:
