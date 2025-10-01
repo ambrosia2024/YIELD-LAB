@@ -27,7 +27,7 @@ Install the dependencies as indicated at the [CY-BENCH](https://github.com/wur-a
 
 ```
 cd cybench
-git clone https://github.com/your-username/ANAND.git
+git clone https://github.com/ambrosia2024/ANAND.git
 mv -r ANAND/* ./
 rm -rf ANAND
 ```
