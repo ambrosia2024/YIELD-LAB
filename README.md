@@ -11,12 +11,12 @@ This repository trains and evaluates machine learning models for crop yield pred
 ```
 conda create -n CYP python=3.10
 conda activate CYP
-conda env update --name CYP --file environment.yml --prune
 ```
 
 ##### 2.  Clone the CY-BENCH repository:
 ```
 git clone https://github.com/WUR-AI/AgML-CY-BENCH.git
+conda env update --name CYP --file environment.yml --prune
 ```
 
 Install the dependencies as indicated at the [CY-BENCH](https://github.com/wur-ai/agml-cy-bench) repository.
