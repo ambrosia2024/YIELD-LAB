@@ -1,4 +1,4 @@
-# Crop Yield Prediction on NUTS3 region
+# A Python Toolkit for Machine Learning based Crop Yield Analysis, Prediction, and Benchmarking
 This repository trains and evaluates machine learning models for crop yield prediction using the CY-BENCH dataset.
 
 # Setup Instructions
