@@ -1,5 +1,6 @@
 import os, sys
 from tqdm import tqdm
+from typing import Optional, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -9,8 +10,12 @@ from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_percenta
 from cybench.datasets.configured import load_dfs_crop
 from cybench.datasets.dataset import Dataset as CYDataset
 
+import torch
+import torchmetrics
+import torch.nn as nn
+
 # Custom library
-from load_data import prepare_features_and_targets
+from loadData import prepare_features_and_targets
 
 def evaluate_predictions_by_year(y_true, y_pred, years, metrics=None, min_samples_per_year=2, epsilon=1e-6):
     """
@@ -151,3 +156,105 @@ def evaluate_OOD_results_from_countries(crop, model_name, pipeline, file_path):
 
         results_by_year = evaluate_predictions_by_year(y_test, y_pred, years_test)
         _ = store_model_results(results_by_year, model_name, country, crop, file_path)
+
+
+class ModelMetrics(nn.Module):
+    """
+    Comprehensive metrics for agricultural yield forecasting.
+
+    Wraps torchmetrics to provide MSE, MAE, RMSE, R², MAPE, SMAPE, NRMSE.
+    Prefix (train/val/test) is used for wandb logging namespacing.
+
+    NOTE: Inherits from nn.Module so metrics are moved to device automatically
+    when the parent LightningModule is moved to GPU.
+    """
+
+    def __init__(self, prefix: str = "test", include_nrmse: bool = True):
+        super().__init__()
+        self.prefix = prefix
+        metrics_dict = {
+            'mse': torchmetrics.MeanSquaredError(),
+            'mae': torchmetrics.MeanAbsoluteError(),
+            'r2': torchmetrics.R2Score(),
+            'mape': torchmetrics.MeanAbsolutePercentageError(),
+            'smape': torchmetrics.SymmetricMeanAbsolutePercentageError(),
+        }
+        # Only include NRMSE if requested (exclude for training since targets are normalized)
+        if include_nrmse:
+            metrics_dict['nrmse'] = torchmetrics.NormalizedRootMeanSquaredError(normalization='mean')
+        self.metrics = torchmetrics.MetricCollection(metrics_dict)
+
+    def update(self, preds: torch.Tensor, targets: torch.Tensor):
+        self.metrics.update(preds, targets)
+
+    def compute(self) -> Dict:
+        return self.metrics.compute()
+
+    def reset(self):
+        self.metrics.reset()
+
+    def log_results(self, step: str = "val"):
+        results = self.compute()
+        print(f"\n{'-' * 60}")
+        print(f"{step.upper()} METRICS ({self.prefix.upper()}):")
+        print(f"  MSE:   {results['mse']:.4f}")
+        print(f"  MAE:   {results['mae']:.4f}")
+        print(f"  RMSE:  {torch.sqrt(results['mse']):.4f}")
+        print(f"  R²:    {results['r2']:.4f}")
+        # MAPE/SMAPE reported as fractions
+        print(f"  MAPE:  {results['mape']:.4f}")
+        print(f"  SMAPE: {results['smape']:.4f}")
+        # Only print NRMSE if it exists (excluded for training metrics)
+        if 'nrmse' in results:
+            print(f"  NRMSE: {results['nrmse']:.4f}")
+        print(f"{'-' * 60}")
+
+def format_metrics_dict(results: Dict) -> Dict[str, float]:
+    """
+    Convert torchmetrics tensor results to a clean dict of floats.
+
+    Args:
+        results: Dict with tensor metrics from ModelMetrics.compute()
+
+    Returns:
+        Dict with all metrics as Python floats
+    """
+    return {
+        'mse': float(results['mse'].item()) if 'mse' in results else None,
+        'mae': float(results['mae'].item()) if 'mae' in results else None,
+        'rmse': float(torch.sqrt(results['mse']).item()) if 'mse' in results else None,
+        'r2': float(results['r2'].item()) if 'r2' in results else None,
+        'mape': float(results['mape'].item()) if 'mape' in results else None,
+        'smape': float(results['smape'].item()) if 'smape' in results else None,
+        'nrmse': float(results['nrmse'].item()) if 'nrmse' in results else None,
+    }
+
+def print_metrics_table(title: str, metrics: Dict, step: str = "test"):
+    """
+    Print a nicely formatted table of all metrics.
+
+    Args:
+        title: Section title (e.g., "CV Fold 1 Results")
+        metrics: Dict from format_metrics_dict()
+        step: Step name for context
+    """
+    print(f"\n{'=' * 70}")
+    print(f"{title}")
+    print(f"{'=' * 70}")
+
+    if metrics.get('mse') is not None:
+        print(f"  MSE:   {metrics['mse']:.4f}")
+    if metrics.get('mae') is not None:
+        print(f"  MAE:   {metrics['mae']:.4f}")
+    if metrics.get('rmse') is not None:
+        print(f"  RMSE:  {metrics['rmse']:.4f}")
+    if metrics.get('r2') is not None:
+        print(f"  R²:    {metrics['r2']:.4f}")
+    if metrics.get('mape') is not None:
+        print(f"  MAPE:  {metrics['mape']:.2f}%")
+    if metrics.get('smape') is not None:
+        print(f"  SMAPE: {metrics['smape']:.2f}%")
+    if metrics.get('nrmse') is not None:
+        print(f"  NRMSE: {metrics['nrmse']:.4f}")
+
+    print(f"{'-' * 70}")
