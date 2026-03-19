@@ -51,10 +51,10 @@ AgML-CY-BENCH/
 │   ├── data/
 │   │   ├── maize/
 │   │   └── wheat/
-│   ├── train/           (from crop_yield_prediction)
-│   ├── process/         (from crop_yield_prediction)
-│   ├── architectures/   (from crop_yield_prediction)
-|   ├── environment.yml  (from crop_yield_prediction
+│   ├── train/           (from YIELD-HUB)
+│   ├── process/         (from YIELD-HUB)
+│   ├── architectures/   (from YIELD-HUB)
+|   ├── environment.yml  (from YIELD-HUB
 |   └──  (other folders and files from CY-BENCH)
 └── (other files from CY-BENCH)
 ```
@@ -63,5 +63,7 @@ AgML-CY-BENCH/
 
 ```
 cd train/
-python statistical_baselines.py --model mlp --country DE --crop wheat --seed 1111 --save_dir ../output/saved_models/ --output_dir ../output/trained_models/
+python statisticalBaselines.py --model mlp --country DE --crop wheat --seed 1111 --save_dir ../output/saved_models/ --output_dir ../output/trained_models/
+python tstBaselines.py --crop maize --country NL --model_type tst --use_sota_features --use_residual_trend --use_recursive_lags --use_cwb_feature --aggregation daily --include_spatial_features
+python linearBaselines.py --crop maize --country NL --model_type xlinear --use_sota_features --use_residual_trend --use_recursive_lags --use_cwb_feature --aggregation daily --include_spatial_features
 ```
