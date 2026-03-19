@@ -67,3 +67,10 @@ python statisticalBaselines.py --model mlp --country DE --crop wheat --seed 1111
 python tstBaselines.py --crop maize --country NL --model_type tst --use_sota_features --use_residual_trend --use_recursive_lags --use_cwb_feature --aggregation daily --include_spatial_features
 python linearBaselines.py --crop maize --country NL --model_type xlinear --use_sota_features --use_residual_trend --use_recursive_lags --use_cwb_feature --aggregation daily --include_spatial_features
 ```
+
+Alternatively, feel free to use the bash script if you are working with SLURM to train all the baselines together:
+```
+cd train/
+sbatch run_baselines.sh
+```
+
