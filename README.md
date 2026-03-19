@@ -27,9 +27,9 @@ Install the dependencies as indicated at the [CY-BENCH](https://github.com/wur-a
 
 ```
 cd cybench
-git clone https://github.com/ambrosia2024/ANAND.git
-mv ANAND/* ./
-rm -rf ANAND
+git clone https://github.com/ambrosia2024/YIELD-HUB.git
+mv YIELD-HUB/* ./
+rm -rf YIELD-HUB
 ```
 
 ##### Step 4: Install project dependencies:
