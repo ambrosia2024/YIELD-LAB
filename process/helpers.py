@@ -3,6 +3,7 @@ import sys
 import random
 import hashlib
 import logging
+from typing import Union
 
 from dataclasses import fields
 from typing import Optional, Dict, List, Tuple
@@ -15,7 +16,7 @@ from lightning.pytorch import seed_everything
 
 # Custom functions and classes
 sys.path.append('../architectures/')
-from modelconfig import TSTModelConfig
+from modelconfig import TSTModelConfig, LinearModelConfig
 
 
 def verify_parameters(crop, model, country):
@@ -118,7 +119,7 @@ def generate_checkpoint_name(args) -> str:
     return name
 
 def save_test_results_to_csv(
-    config: TSTModelConfig,
+    config: Union[TSTModelConfig, LinearModelConfig],
     test_results: Dict[str, float],
     test_years: List[int],
     run_id: str,

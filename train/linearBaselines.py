@@ -1,24 +1,24 @@
-
 # -*- coding: utf-8 -*-
 """
 --------------------
 Author: XYZ
-Description: A time series transformers based crop yield prediction framework that combines state-of-the-art time architectures with agricultural domain knowledge. 
+Description: A linear architecture based crop yield prediction framework that combines state-of-the-art time architectures with agricultural domain knowledge. 
 Python version: 3.12.0
-
 --------------------
-Architecture overview: This script implements a unified interface to five transformer-based time series architectures from the HuggingFace Transformers library:
-    • Autoformer: Auto-correlation mechanism for long-term dependency discovery (https://arxiv.org/abs/2106.13008)
-    • PatchTST: Patch time series into sub-sequences for efficient processing (https://arxiv.org/pdf/2211.14730)
-    • TSMixer: All-MLP architecture with mixing layers (via PatchTSMixer) (https://arxiv.org/pdf/2303.06053)
-    • Informer: ProbSparse self-attention for long sequences (https://arxiv.org/pdf/2012.07436)
-    • TST: Vanilla time series transformer with canonical attention (https://arxiv.org/pdf/2010.02803)
+Architecture overview: This script implements unified linear baseline architectures that serve as
+strong references for evaluating transformer complexity:
 
-All models share a common base class (BaseTimeSeriesModel) ensuring consistent training, evaluation, and inference interfaces.
+    • NLinear: Simple linear layer with last-value normalization (https://arxiv.org/abs/2205.13504)
+    • DLinear: Decomposed linear (trend + remainder) (https://arxiv.org/abs/2205.13504)
+    • XLinear: Linear with exogenous variable handling (https://arxiv.org/pdf/2305.10721)
+    • RLinear: NLinear with RevIN (Reversible Instance Normalization) (https://arxiv.org/pdf/2601.09237)
 
---------------------
-Data pipeline: 
-The script processes agricultural data through multiple stages:
+These models serve as critical baselines. If linear models match or beat
+transformers, it suggests the yield signal is dominated by trend/mean-shift
+rather than complex temporal patterns.
+
+------------
+Pipeline: The script processes agricultural data through multiple stages:
 
 1. INPUT FEATURES
    - Weather: tmin, tmax, tavg, precipitation, radiation, (optional: cwb)
@@ -35,28 +35,34 @@ The script processes agricultural data through multiple stages:
    - dekad:   36 time steps  (10-day periods, standard in ag monitoring)
 
 3. GROWTH-STAGE PROCESSING
-   Weather data is masked to only include observations between crop start-of-season (SOS) and end-of-season (EOS) dates, ensuring the model focuses on the growth period.
+   Weather data is masked to only include observations between crop start-of-season
+   (SOS) and end-of-season (EOS) dates, ensuring the model focuses on the growth
+   period.
 
 4. NORMALIZATION
    - Time series: Per-feature min-max scaling
    - Static features: Mean-centering and scaling
    - Targets: Normalized to zero mean, unit variance
 
---------------------
+----------------
 Other optional/advanced features:
 
 1. RESIDUAL TREND MODELING (--use_residual_trend)
-   Uses Mann-Kendall trend detection to identify significant linear trends in training yields, then models residuals (yield - trend) to improve forecasting for datasets with strong yield progression over time.
+   Uses Mann-Kendall trend detection to identify significant linear trends in
+   training yields, then models residuals (yield - trend) to improve forecasting
+   for datasets with strong yield progression over time.
 
 2. RECURSIVE LAG PREDICTION (--use_recursive_lags)
-   For true out-of-sample testing: uses predicted yields as lag features during test set evaluation instead of ground truth, preventing data leakage.
+   For true out-of-sample testing: uses predicted yields as lag features during
+   test set evaluation instead of ground truth, preventing data leakage.
 
 3. SPATIAL FEATURES (--include_spatial_features)
-    Adds explicit latitude/longitude as static features (beyond location embeddings).
+   Adds explicit latitude/longitude as static features (beyond location embeddings).
 
 4. FEATURE ABLATION TOGGLES
-   --use_cwb_feature: Include climate water balance
-   --drop_tavg: Drop average temperature if dataset computes it as (tmin+tmax)/2
+   --use_cwb_feature: Include crop water balance (redundant with prec+temp)
+   --drop_tavg:       Drop average temperature if dataset computes it as (tmin+tmax)/2
+
 
 -------------
 Training workflow:
@@ -77,44 +83,42 @@ Output generated:
     Checkpoints: Saved to checkpoints/ with descriptive filenames
     Results CSV: Detailed predictions with actuals, errors, metadata
     WandB: Full experiment tracking with metrics, parameters, artifacts
-    
+
+--------------
+Usage:
+# Basic training with NLinear 
+    python linearBaselines.py --crop maize --country NL --model_type nlinear --epochs 50 --aggregation daily
+
+# Use all SOTA features (Fourier encoding + residual trend + recursive lags)
+    python linearBaselines.py --crop maize --country NL --model_type xlinear --use_sota_features --use_residual_trend --use_recursive_lags --use_cwb_feature --aggregation daily
+
+# Quick test run (5 epochs)
+    python linearBaselines.py --crop maize --country NL --model_type dlinear --epochs 5 --aggregation daily --test_years 5 --aggregation daily
+
+# Train final model only (no CV, using fixed epochs from prior analysis)
+    python linearBaselines.py --crop maize --country NL --model_type nlinear --final_only --final_fixed_epochs 23 --lag_years 2
+
 --------------------
 Hyperparameters:
-Key hyperparameters:
     --lr:              Learning rate (default: 1e-4)
     --weight_decay:    L2 regularization (default: 1e-5)
     --batch_size:      Training batch size (default: 16)
     --lag_years:       Historical yield lags (1 or 2, default: 1)
     --aggregation:     Temporal resolution (daily/weekly/dekad, default: dekad)
     --seed:            Random seed for reproducibility (default: 42)
-
---------------
-Usage:
-# Basic training with Autoformer: python tstBaselines.py --crop maize --country NL --model_type autoformer --epochs 50 --aggregation daily
-
-# Use all SOTA features (Fourier encoding + residual trend + recursive lags)
-    python tstBaselines.py --crop maize --country NL --model_type tst --use_sota_features --use_residual_trend --use_recursive_lags --use_cwb_feature --aggregation daily
-
-# Quick test run (5 epochs)
-    python tstBaselines.py --crop maize --country NL --model_type tsmixer --epochs 5 --aggregation daily --test_years 5
+    --use_revIN:       Enable RevIN normalization for XLinear (default: False)
 
 
 ------------
 Core dependencies:
     - torch>=2.0: PyTorch for model implementation
     - lightning: PyTorch Lightning for training framework
-    - transformers>=4.30: Time series model architectures
     - torchmetrics: Evaluation metrics
     - wandb: Experiment tracking
     - pymannkendall: Trend detection for residual modeling
     - pandas, numpy: Data manipulation
-
-Internal dependencies:
-    - cybench.datasets: Agricultural data loading utilities
-    - cybench.config: Domain constants and configurations
 """
 
-# %% Loading libraries
 import os
 import sys
 import random
@@ -153,10 +157,10 @@ from validateModel import print_metrics_table
 from loadData import calculate_fixed_split, DailyCYBenchSeqDataModule
 
 sys.path.append('../architectures/')
-from modelconfig import TSTModelConfig
-from tstLayer import create_model
+from modelconfig import LinearModelConfig
+from linearLayer import create_model
 
-# Setting precision
+# Set matmul precision conditionally based on GPU capability
 if torch.cuda.is_available():
     capability = torch.cuda.get_device_capability()
     if capability[0] >= 8:  # Ampere or newer
@@ -166,28 +170,25 @@ if torch.cuda.is_available():
         logger.info(f"Keeping default matmul precision (GPU capability {capability} < 8.0)")
 else:
     logger.info("Running on CPU, matmul precision setting has no effect")
-
+ 
 # Boilerplate code
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="CY-BENCH Time Series Yield Forecasting with Expanding Window CV")
+        description="CY-BENCH Time Series Yield Forecasting with Linear Baseline Models")
     parser.add_argument('--crop', default="maize")
     parser.add_argument('--country', default="NL")
-    parser.add_argument('--model_type', default="autoformer",
-                        choices=['autoformer', 'patchtst', 'tsmixer', 'informer', 'tst'])
+    parser.add_argument('--model_type', default="nlinear",
+                        choices=['nlinear', 'dlinear', 'xlinear', 'rlinear'])
     parser.add_argument('--aggregation', default="dekad",
                         choices=['daily', 'weekly', 'dekad'])
     parser.add_argument('--use_sota_features', action='store_true')
     parser.add_argument('--include_spatial_features', action='store_true')
     parser.add_argument('--lag_years', type=int, default=1, choices=[0, 1, 2],
                         help='Number of lagged yield years (max 2, default: 1)')
-    parser.add_argument('--use_recursive_lags', action='store_true',
-                        help='Use predicted yields as lags during testing for true out-of-sample evaluation '
-                             '(default: False, uses observed test-set yields as lags)')
     parser.add_argument('--load_checkpoint', default=None,
                         help='Path to checkpoint to load for fine-tuning')
-    parser.add_argument('--save_checkpoint_dir', default='checkpoints-test',
-                        help='Directory to save model checkpoints (default: checkpoints/)')
+    parser.add_argument('--save_checkpoint_dir', default='checkpoints-linear',
+                        help='Directory to save model checkpoints')
     parser.add_argument('--results_dir', default='checkpoints/results',
                         help='Directory to save CSV results (default: checkpoints/results/)')
     parser.add_argument('--epochs', type=int, default=50,
@@ -197,18 +198,19 @@ if __name__ == "__main__":
     parser.add_argument('--weight_decay', type=float, default=1e-5)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--use_residual_trend', action='store_true')
+    parser.add_argument('--use_recursive_lags', action='store_true',
+                        help='Use predicted yields as lags during testing (true out-of-sample)')
     parser.add_argument('--num_workers', type=int, default=0,
                         help='DataLoader workers (default: 0 for HPC compatibility)')
     parser.add_argument('--test_years', type=int, default=3,
                         help='Number of years for final test set (default: 3)')
-    # Feature configuration flags for ablation studies
+    # Feature configuration flags
     parser.add_argument('--use_cwb_feature', action='store_true',
-                        help='Include crop water balance (cwb) as a feature. '
-                             'Note: cwb is derived from prec and ET0 (depends on temperature), '
-                             'so it may be redundant with existing weather features.')
+                        help='Include crop water balance (cwb) as a feature')
     parser.add_argument('--drop_tavg', action='store_true',
-                        help='Drop tavg feature if dataset computes it as (tmin+tmax)/2, '
-                             'which carries no additional information beyond tmin/tmax.')
+                        help='Drop tavg feature')
+    parser.add_argument('--use_revIN', action='store_true',
+                        help='Use RevIN normalization for XLinear endogenous series')
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -223,13 +225,14 @@ if __name__ == "__main__":
     print(f"CY-BENCH  |  {args.model_type.upper()}  |  {args.crop}-{args.country}  "
           f"|  {args.aggregation.upper()}")
     print(f"  SOTA={args.use_sota_features}  Spatial={args.include_spatial_features}  "
-          f"Lag={args.lag_years}")
+          f"Lag={args.lag_years}  RevIN={args.use_revIN}")
+    print(f"  RecursiveLags={args.use_recursive_lags}  ResidualTrend={args.use_residual_trend}")
     print(f"  TestYears={args.test_years}")
     print(f"  lr={args.lr}  wd={args.weight_decay}  epochs={args.epochs}  "
           f"batch={args.batch_size}  seed={args.seed}")
     print(f"{'=' * 70}\n")
 
-    config = TSTModelConfig(
+    config = LinearModelConfig(
         crop=args.crop, country=args.country,
         model_type=args.model_type, aggregation=args.aggregation,
         use_sota_features=args.use_sota_features,
@@ -241,25 +244,32 @@ if __name__ == "__main__":
         max_epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay,
         test_years=args.test_years,
         use_residual_trend=args.use_residual_trend,
+        use_recursive_lags=args.use_recursive_lags,
         use_cwb_feature=args.use_cwb_feature,
         drop_tavg=args.drop_tavg,
-        use_recursive_lags=args.use_recursive_lags,
+        use_revIN=args.use_revIN,
         results_dir=args.results_dir,
     )
 
-    # No longer mutating global WEATHER_FEATURES - using config.weather_features property instead
-    # This prevents timing issues where model init captures the wrong value
     print(f"[Feature Config] Weather features: {config.weather_features}")
     print(f"[Feature Config] Total time series vars ({len(config.time_series_vars)}): {config.time_series_vars}")
 
-    # Create checkpoint directory if it doesn't exist
+    if config.use_recursive_lags and config.lag_years > 0:
+        print(f"\n{'!' * 70}")
+        print(f"[RECURSIVE LAGS ENABLED]")
+        print(f"  During testing, model predictions will be used as lag features")
+        print(f"  instead of observed (actual) historical yields.")
+        print(f"  This provides true out-of-sample evaluation with error accumulation.")
+        print(f"{'!' * 70}\n")
+
+    # Create checkpoint directory
     os.makedirs(args.save_checkpoint_dir, exist_ok=True)
     print(f"\n[Checkpoint Config]")
     print(f"  Save directory: {args.save_checkpoint_dir}")
     if args.load_checkpoint:
         print(f"  Load checkpoint: {args.load_checkpoint}")
 
-    # Get available years for this country-crop combination
+    # Get available years
     df_y, dfs_x = load_dfs_crop(config.crop, [config.country])
     if df_y is None or len(df_y) == 0:
         print(f"[ERROR] No data for {config.crop}-{config.country}")
@@ -339,7 +349,6 @@ if __name__ == "__main__":
 
     print("\nEvaluating final model...")
     test_results = trainer.test(model_final, dm_final, ckpt_path="best")
-    # Use same pattern as CV folds - Lightning returns float dict, not torchmetrics tensors
     if test_results:
         r = test_results[0]
         final_metrics = {
@@ -371,14 +380,18 @@ if __name__ == "__main__":
     print(f"\n[CSV Results] Per-Year Test Metrics:")
     for year in sorted(fixed_splits['test_years']):
         print(f"  Year {year}:")
-        for metric in ['nrmse', 'mape', 'r2']:
-            if f'{metric}_{year}' in per_year_metrics:
-                print(f"    {metric.upper()}: {per_year_metrics[f'{metric}_{year}']:.4f}")
+        for metric in ['mse', 'mae', 'rmse', 'r2', 'mape', 'smape']:
+            key = f'{metric}_{year}'
+            if key in per_year_metrics:
+                print(f"    {metric.upper()}: {per_year_metrics[key]:.4f}")
 
-    print(f"  Overall:")
-    for metric in ['nrmse', 'mape', 'r2']:
-        if f'{metric}_overall' in per_year_metrics:
-            print(f"    {metric.upper()}: {per_year_metrics[f'{metric}_overall']:.4f}")
+    # Log overall metrics
+    if 'mse_overall' in per_year_metrics:
+        print(f"\n  Overall:")
+        for metric in ['mse', 'mae', 'rmse', 'r2', 'mape', 'smape']:
+            key = f'{metric}_overall'
+            if key in per_year_metrics:
+                print(f"    {metric.upper()}: {per_year_metrics[key]:.4f}")
 
     # Save to CSV
     save_test_results_to_csv(
@@ -398,12 +411,12 @@ if __name__ == "__main__":
     print(f"  Val years ({len(fixed_splits['val_years'])}): {sorted(fixed_splits['val_years'])}")
     print(f"  Test years ({len(fixed_splits['test_years'])}): {sorted(fixed_splits['test_years'])}")
 
-    # Print final results with all metrics
+    # Print final results
     print_metrics_table(
         f"FINAL RESULTS: {args.crop}-{args.country}",
         final_metrics
     )
-    
+
     # Print experiment completion message
     print(f"\n{'=' * 70}")
     print(f"Experiment complete: {args.crop}-{args.country}")

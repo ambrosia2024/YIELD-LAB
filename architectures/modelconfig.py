@@ -94,3 +94,70 @@ class TSTModelConfig:
         n_lagged = self.lag_years
 
         return n_soil + n_location + n_crop + n_spatial + n_lagged
+    
+
+@dataclass
+class LinearModelConfig:
+    """Central configuration for time series forecasting model."""
+    crop: str = "maize"
+    country: str = "NL"
+    model_type: str = "nlinear"
+    aggregation: str = "dekad"
+    use_sota_features: bool = False
+    include_spatial_features: bool = False
+    use_residual_trend: bool = True
+    lag_years: int = 1  # Default to 1, max 2 (constrained in CLI)
+    load_checkpoint: Optional[str] = None
+    seed: int = 42
+    batch_size: int = 16
+    num_workers: int = 0  # Default 0 for HPC compatibility
+    lr: float = 1e-4
+    weight_decay: float = 1e-5
+    max_epochs: int = 50
+    test_years: int = 3
+    # Feature toggles for ablation studies
+    use_cwb_feature: bool = False  # Include crop water balance (redundant with prec+temp)
+    drop_tavg: bool = False  # Drop tavg if dataset computes it as (tmin+tmax)/2
+    use_revIN: bool = False  # Use RevIN normalization for XLinear endogenous series
+    # Recursive lag prediction for true out-of-sample testing
+    use_recursive_lags: bool = False  # Use predicted yields as lags during testing (default: False for backward compat)
+    # Results directory for CSV output
+    results_dir: str = "checkpoints/results"
+
+    @property
+    def seq_len(self):
+        """Sequence length derived from aggregation frequency."""
+        return {"daily": 365, "weekly": 52, "dekad": 36}.get(self.aggregation, 365)
+
+    @property
+    def weather_features(self) -> List[str]:
+        """
+        Compute the list of weather features based on config flags.
+        """
+        features = list(WEATHER_FEATURES_WITH_CWB if self.use_cwb_feature
+                       else WEATHER_FEATURES_BASE)
+        if self.drop_tavg:
+            features = [f for f in features if f != 'tavg']
+        return features
+
+    @property
+    def time_series_vars(self) -> List[str]:
+        """Full list of time series variables including remote sensing."""
+        return self.weather_features + REMOTE_SENSING_FEATURES
+
+    def _compute_expected_static_features(self) -> int:
+        """
+        Compute the total expected static feature count from the current config.
+        """
+        n_soil = len(SOIL_PROPERTIES)
+        n_location = len(LOCATION_PROPERTIES)
+        n_crop = 0
+        for date_name in CROP_CALENDAR_DATES:
+            if date_name in ["sos_date", "eos_date"]:
+                n_crop += 2  # sin and cos
+            else:
+                n_crop += 1
+        n_spatial = 2 if self.include_spatial_features else 0
+        n_lagged = self.lag_years
+
+        return n_soil + n_location + n_crop + n_spatial + n_lagged

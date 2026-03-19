@@ -83,7 +83,6 @@ SOTA_TEMPORAL_VARS_LIST = [
 
 # Remote sensing features - always included
 REMOTE_SENSING_FEATURES = ['fpar', 'ndvi', 'ssm', 'rsm']
-
 print(f"[Feature Config] SOTA Temporal vars ({len(SOTA_TEMPORAL_VARS_LIST)}): {SOTA_TEMPORAL_VARS_LIST}")
 
 class BaseTimeSeriesModel(ABC, pl.LightningModule):

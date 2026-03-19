@@ -1,5 +1,6 @@
 import sys
 import logging
+from typing import Union
 
 import numpy as np
 import pandas as pd
@@ -21,7 +22,7 @@ from cybench.config import (
 
 # Custom functions
 sys.path.append('../architectures/')
-from modelconfig import TSTModelConfig
+from modelconfig import TSTModelConfig, LinearModelConfig
 
 # %% Global constants
 DEKAD_FREQ = "10D"
@@ -31,7 +32,7 @@ DAILY_FREQ = "D"
 # Maximum sequence lengths for padding — ensures uniform tensor shapes
 MAX_SEQ_LENS = {"daily": 365, "weekly": 52, "dekad": 36}
 
-# Weather feature lists - used as defaults by TSTModelConfig.weather_features property
+# Weather feature lists - used as defaults by TSTModelConfig or LinearModelConfig.weather_features property
 # These are module-level constants; actual features used come from config
 WEATHER_FEATURES_BASE = ['tmin', 'tmax', 'tavg', 'prec', 'rad']
 WEATHER_FEATURES_WITH_CWB = ['tmin', 'tmax', 'tavg', 'prec', 'cwb', 'rad']
@@ -769,7 +770,7 @@ class DailyYieldDataset(Dataset):
         self.years = torch.tensor(years, dtype=torch.long) if years is not None else None
         self.adm_ids = list(adm_ids) if adm_ids is not None else None
 
-        # FIX: replace None with nan before passing to torch.tensor().
+        # replace None with nan before passing to torch.tensor().
         # _extract_static_features() can return lat=None / lon=None when location
         # data is missing. torch.tensor([1.2, None, 3.4]) raises a TypeError.
         def _safe_tensor(lst):
@@ -797,10 +798,10 @@ class DailyYieldDataset(Dataset):
 class DailyCYBenchSeqDataModule(pl.LightningDataModule):
     """Lightning DataModule: loads CY-Bench data, builds features, normalises."""
 
-    def __init__(self, config: TSTModelConfig):
+    def __init__(self, config: Union[TSTModelConfig, LinearModelConfig]):
         super().__init__()
         # Ignore config in save_hyperparameters to avoid circular checkpoint references
-        # (TSTModelConfig contains load_checkpoint which could point to another checkpoint)
+        # (TSTModelConfig or LinearModelConfig contains load_checkpoint which could point to another checkpoint)
         self.save_hyperparameters(ignore=['config'])
         self.config = config
         self.y_mean = self.y_std = None
