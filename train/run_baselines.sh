@@ -56,7 +56,7 @@ run_group () {
         > checkpoints/results/${model}_${country}_${crop}.txt 2>&1 &
 
         pids+=($!)
-
+	sleep 2
     done
 
     for pid in "${pids[@]}"; do
@@ -111,7 +111,7 @@ for model in "${linear_models[@]}"; do
     > checkpoints/results/${model}_${country}_${crop}.txt 2>&1 &
 
     pids+=($!)
-
+    sleep 2
 done
 done
 done
