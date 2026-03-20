@@ -21,17 +21,12 @@ from cybench.config import (
 )
 
 # Custom functions
+from featureEngineering import build_daily_input_sequence, _get_static_feature_names
+
 sys.path.append('../architectures/')
 from modelconfig import TSTModelConfig, LinearModelConfig
 
 # %% Global constants
-DEKAD_FREQ = "10D"
-WEEKLY_FREQ = "W-MON"
-DAILY_FREQ = "D"
-
-# Maximum sequence lengths for padding — ensures uniform tensor shapes
-MAX_SEQ_LENS = {"daily": 365, "weekly": 52, "dekad": 36}
-
 # Weather feature lists - used as defaults by TSTModelConfig or LinearModelConfig.weather_features property
 # These are module-level constants; actual features used come from config
 WEATHER_FEATURES_BASE = ['tmin', 'tmax', 'tavg', 'prec', 'rad']
@@ -53,19 +48,6 @@ SOTA_TEMPORAL_VARS_LIST = [
 print(f"[Feature Config] Static vars ({len(STANDARD_STATIC_VARS)}): {STANDARD_STATIC_VARS}")
 print(f"[Feature Config] SOTA Temporal vars ({len(SOTA_TEMPORAL_VARS_LIST)}): {SOTA_TEMPORAL_VARS_LIST}")
 
-# Sentinel value thresholds for remote sensing data
-RS_SENTINEL_THRESHOLDS = {
-    'fpar': (-0.1, 1.05),   # Physical bounds with small tolerance
-    'ndvi': (-0.5, 1.05),   # Flag anything below -0.5 as sentinel
-    'ssm':  (-0.1, 1.05),
-    'rsm':  (-0.1, 1.05),
-}
-RS_VALID_RANGES = {
-    'fpar': (0.0, 1.0),
-    'ndvi': (0.1, 1.0),    # 0.1 minimum for vegetated agricultural surfaces
-    'ssm':  (0.0, 1.0),
-    'rsm':  (0.0, 1.0),
-}
 
 def prepare_features_and_targets(dataset):
     """
@@ -126,638 +108,6 @@ def prepare_features_and_targets(dataset):
     y = np.array(y_list, dtype=float)
     return X, y, years_list
 
-# %% Shared parameters for time-series models
-
-def _get_static_feature_names(
-    include_spatial_features: bool,
-    lag_years: int,
-) -> List[str]:
-    """
-    Return static feature names in the EXACT order that _extract_static_features()
-    appends values. This single source of truth is used by:
-      - DailyCYBenchSeqDataModule._compute_feature_normalization()
-      - DailyCYBenchSeqDataModule._get_static_feature_names() (thin wrapper)
-      - BaseTimeSeriesModel._normalize_and_impute_static()
-      - BaseTimeSeriesModel._get_static_feature_names() (thin wrapper)
-
-    Keeping one implementation prevents the two classes from drifting out of sync,
-    which would silently apply wrong normalization statistics to the wrong feature
-    column.
-
-    Feature order (must match _extract_static_features exactly):
-      1. Soil properties
-      2. Location properties
-      3. Crop calendar dates (with cyclic encoding for sos_date and eos_date)
-      4. Explicit lat/lon (conditional)
-      5. Lagged yields (conditional)
-    """
-    names = list(SOIL_PROPERTIES)
-    names.extend(LOCATION_PROPERTIES)
-    # Crop calendar with cyclic encoding: sos_date and eos_date get sin/cos pairs
-    for date_name in CROP_CALENDAR_DATES:
-        if date_name in ["sos_date", "eos_date"]:
-            names.extend([f'{date_name}_sin', f'{date_name}_cos'])
-        else:
-            names.append(date_name)
-
-    if include_spatial_features:
-        names.extend(['latitude_explicit', 'longitude_explicit'])
-
-    for lag in range(1, lag_years + 1):
-        names.append(f'lag_yield_{lag}')
-
-    return names
-
-def _clean_rs_series(series: pd.Series, var_name: str) -> pd.Series:
-    """
-    Mask sentinel values, then fill gaps, then clip to valid range.
-
-    Previous implementation did ffill().bfill() BEFORE clipping, which
-    could propagate sentinel values (e.g., -9999) across the season before
-    being clipped. Now we mask first, then fill, then clip.
-
-    Args:
-        series: Raw remote sensing series
-        var_name: Variable name for looking up thresholds
-
-    Returns:
-        Cleaned series with sentinels removed, gaps filled, and values clipped
-    """
-    s = series.copy().astype(float)
-    lo, hi = RS_SENTINEL_THRESHOLDS.get(var_name, (-1e6, 1e6))
-
-    # Step 1: mask out-of-physical-range values BEFORE any filling
-    s[(s < lo) | (s > hi)] = np.nan
-
-    # Step 2: fill gaps (now only real gaps, not sentinels)
-    s = s.interpolate(method='linear', limit_direction='both')
-    s = s.ffill().bfill()
-
-    # Step 3: clip to valid agronomic range
-    valid_lo, valid_hi = RS_VALID_RANGES.get(var_name, (lo, hi))
-    s = s.clip(valid_lo, valid_hi)
-
-    return s
-
-
-def interpolate_to_daily(data: pd.Series, target_dates: pd.DatetimeIndex,
-                         method: str = 'linear', interpolate_data: str = 'unknown') -> pd.Series:
-    """
-    Interpolate non-daily time series data to daily frequency.
-
-    For remote sensing data, uses _clean_rs_series to properly handle
-    sentinel values before filling.
-
-    Args:
-        data: Input series with non-daily frequency
-        target_dates: DatetimeIndex for output
-        method: Interpolation method ('linear' or 'ffill')
-        interpolate_data: Data type for special handling ('fpar', 'ndvi', 'soil_moisture')
-
-    Returns:
-        Interpolated daily series
-    """
-    if isinstance(data.index, pd.MultiIndex):
-        data = data.copy()
-        data.index = pd.to_datetime(data.index.get_level_values(-1))
-    else:
-        data = data.copy()
-        data.index = pd.to_datetime(data.index)
-
-    data_daily = data.reindex(target_dates, method=None)
-
-    # Use proper sentinel-aware cleaning for RS variables
-    if interpolate_data in RS_SENTINEL_THRESHOLDS:
-        data_daily = _clean_rs_series(data_daily, interpolate_data)
-    elif interpolate_data == 'soil_moisture':
-        data_daily = data_daily.interpolate(method='linear', limit_direction='both').clip(lower=0)
-    elif method == 'linear':
-        data_daily = data_daily.interpolate(method='linear', limit_direction='both')
-    else:
-        data_daily = data_daily.ffill().bfill()
-
-    return data_daily
-
-
-def create_sota_temporal_features(dates: pd.DatetimeIndex,
-                                   sos_date=None, eos_date=None) -> np.ndarray:
-    """
-    Create Fourier-based temporal features for periodic pattern encoding.
-
-    Replaced redundant season_sin/season_cos with crop-calendar-relative position.
-    Previous columns 4-5 were duplicates of columns 2-3 (just month with different offset).
-    Now columns 4-5 encode position relative to crop calendar (0=SOS, 1=EOS).
-
-    Args:
-        dates: DatetimeIndex to encode
-        sos_date: Start of season date for relative position encoding
-        eos_date: End of season date for relative position encoding
-
-    Returns:
-        Array of shape (len(dates), 6) with sin/cos encodings:
-        - col 0-1: Day-of-year (annual cycle)
-        - col 2-3: Month (coarser annual cycle)
-        - col 4-5: Crop-calendar-relative position (or zeros if no calendar)
-    """
-    doy_norm = dates.dayofyear / 365.0
-    month_norm = (dates.month - 1) / 12.0  # 0-indexed for consistency
-
-    if sos_date is not None and eos_date is not None:
-        # Crop-calendar-relative position: 0 at SOS, 1 at EOS
-        # This is genuinely useful for agronomic modeling
-        total_days = max((eos_date - sos_date).days, 1)
-        rel_pos = np.clip(
-            [(d - sos_date).days / total_days for d in dates], 0, 1
-        )
-        season_sin = np.sin(2 * np.pi * rel_pos)
-        season_cos = np.cos(2 * np.pi * rel_pos)
-    else:
-        # No crop calendar available - use zeros
-        season_sin = np.zeros(len(dates))
-        season_cos = np.zeros(len(dates))
-
-    return np.column_stack([
-        np.sin(2 * np.pi * doy_norm),    # col 0: sin_doy
-        np.cos(2 * np.pi * doy_norm),    # col 1: cos_doy
-        np.sin(2 * np.pi * month_norm),  # col 2: sin_month
-        np.cos(2 * np.pi * month_norm),  # col 3: cos_month
-        season_sin,                       # col 4: season_sin (relative to crop calendar)
-        season_cos,                       # col 5: season_cos (relative to crop calendar)
-    ])
-
-# % Feature engineering
-def _get_aggregation_params(aggregation: str, year: int,
-                             crop_season_info=None) -> Tuple[pd.DatetimeIndex, int, str]:
-    """
-    Return target DatetimeIndex, sequence length, and frequency string.
-
-    Fragile period-then-filter approach replaced with date-range-first approach.
-    Leap day filtering now happens before period trimming to prevent off-by-one errors.
-    """
-    freq_map = {"daily": (DAILY_FREQ, 365), "weekly": (WEEKLY_FREQ, 52), "dekad": (DEKAD_FREQ, 36)}
-    if aggregation not in freq_map:
-        raise ValueError(f"Unknown aggregation: {aggregation}")
-
-    freq_str, default_len = freq_map[aggregation]
-
-    if crop_season_info is not None:
-        cutoff_date = crop_season_info['cutoff_date']
-        sos_date = crop_season_info.get('sos_date')
-        if sos_date is not None:
-            # Generate date range from SOS to cutoff, then filter leap days
-            raw_dates = pd.date_range(start=sos_date, end=cutoff_date, freq=freq_str)
-        else:
-            # No SOS date, work backwards from cutoff
-            raw_dates = pd.date_range(end=cutoff_date, periods=default_len + 5, freq=freq_str)
-    else:
-        # No crop season info, use year-end
-        raw_dates = pd.date_range(end=f"{year}-12-31", periods=default_len + 5, freq=freq_str)
-
-    # Filter leap days BEFORE trimming to prevent off-by-one
-    target_dates = raw_dates[~((raw_dates.month == 2) & (raw_dates.day == 29))]
-
-    # Trim to max allowed length from the END (most recent dates)
-    target_dates = target_dates[-default_len:]
-
-    # Validate: warn if we got significantly fewer dates than expected
-    if len(target_dates) < default_len * 0.8:
-        logging.warning(
-            f"[{aggregation}] Year {year}: expected ~{default_len} periods, "
-            f"got {len(target_dates)}. Check crop_season_info bounds."
-        )
-
-    return target_dates, len(target_dates), freq_str
-
-
-def _extract_weather_features(dataset: CYDataset, adm_id: str, year: int,
-                               target_dates: pd.DatetimeIndex, aggregation: str,
-                               weather_features_list: List[str],
-                               debug: bool = False) -> np.ndarray:
-    """
-    Extract and aggregate weather features.
-
-    Now accepts weather_features_list parameter derived from config
-    instead of using a hardcoded list, respecting use_cwb_feature and drop_tavg flags.
-
-    Args:
-        dataset: CY-Bench dataset
-        adm_id: Administrative region ID
-        year: Year to extract data for
-        target_dates: DatetimeIndex for resampling
-        aggregation: Temporal aggregation ('daily', 'weekly', 'dekad')
-        weather_features_list: List of weather features to extract (from config.weather_features)
-        debug: Enable debug logging (deprecated, use logging level)
-
-    Returns:
-        Array of shape (seq_len, len(weather_features_list)) with weather data
-    """
-    seq_len = len(target_dates)
-    n_weather = len(weather_features_list)
-    weather_features = np.zeros((seq_len, n_weather), dtype=np.float32)
-
-    if "meteo" not in dataset._dfs_x:
-        logging.warning(f"[{adm_id}] No meteorological data available")
-        return weather_features
-
-    try:
-        meteo = dataset._dfs_x["meteo"].loc[adm_id]
-        all_meteo = meteo.reset_index() if isinstance(meteo, pd.Series) else meteo
-        year_data = (all_meteo[all_meteo[KEY_YEAR] == year]
-                     if KEY_YEAR in all_meteo.columns else all_meteo).copy()
-        if year_data.empty:
-            logging.warning(f"[{adm_id}] No data for year {year}, using last 365 days")
-            year_data = all_meteo.tail(365)
-
-        # Iterate over config-derived feature list instead of hardcoded list
-        if aggregation == "daily":
-            # Build output with correct column order, filling missing columns with NaN
-            # Then convert NaN to 0 (mean in z-score space) during normalization
-            weather_features = np.full((seq_len, n_weather), np.nan, dtype=np.float32)
-            daily_df = pd.DataFrame(index=target_dates)
-            for j, col in enumerate(weather_features_list):
-                if col in year_data.columns:
-                    daily_df[col] = interpolate_to_daily(year_data[col], target_dates,
-                                                         method='linear',
-                                                         interpolate_data='weather')
-                    weather_features[:, j] = daily_df[col].values
-            # Leave NaNs in place - normalization will impute to 0.0 (mean in z-score space)
-            # This ensures correct z-score computation instead of using raw 0.0 values
-        else:
-            # For weekly/dekad: interpolate to FULL daily resolution first, then aggregate
-            # This ensures true temporal averaging instead of point-sampling
-            freq = WEEKLY_FREQ if aggregation == "weekly" else DEKAD_FREQ
-            full_daily_range = pd.date_range(start=target_dates[0], end=target_dates[-1], freq='D')
-
-            daily_df_full = pd.DataFrame(index=full_daily_range)
-            for col in weather_features_list:
-                if col in year_data.columns:
-                    daily_df_full[col] = interpolate_to_daily(year_data[col], full_daily_range,
-                                                               method='linear',
-                                                               interpolate_data='weather')
-
-            # Now aggregate to target frequency (true temporal averaging)
-            resampled = daily_df_full.resample(freq).mean()
-
-            # Reindex to match exact target_dates
-            expected_index = pd.date_range(start=target_dates[0], periods=seq_len, freq=freq)
-            resampled = resampled.reindex(expected_index)
-
-            # Build output with correct column order, filling missing columns with NaN
-            weather_features = np.full((seq_len, n_weather), np.nan, dtype=np.float32)
-            for j, col in enumerate(weather_features_list):
-                if col in resampled.columns:
-                    weather_features[:, j] = resampled[col].values
-            # Leave NaNs in place - normalization will impute to 0.0 (mean in z-score space)
-    except Exception as e:
-        logging.error(f"[{adm_id}] Weather extraction error: {e}")
-
-    return weather_features
-
-
-def _extract_remote_sensing_features(dataset: CYDataset, adm_id: str, year: int,
-                                     target_dates: pd.DatetimeIndex, aggregation: str,
-                                     debug: bool = False) -> np.ndarray:
-    """
-    Extract and aggregate remote sensing features (fpar, ndvi, ssm, rsm).
-
-    Args:
-        dataset: CY-Bench dataset
-        adm_id: Administrative region ID
-        year: Year to extract data for
-        target_dates: DatetimeIndex for resampling
-        aggregation: Temporal aggregation ('daily', 'weekly', 'dekad')
-        debug: Enable debug logging (deprecated, use logging level)
-
-    Returns:
-        Array of shape (seq_len, 4) with remote sensing features
-    """
-    seq_len = len(target_dates)
-    rs_features = np.zeros((seq_len, 4))
-
-    for i, rs_var in enumerate(["fpar", "ndvi", "ssm", "rsm"]):
-        try:
-            if rs_var in ["ssm", "rsm"]:
-                if "soil_moisture" not in dataset._dfs_x:
-                    continue
-                df = dataset._dfs_x["soil_moisture"]
-                if (adm_id, year) not in df.index:
-                    continue
-                rs_data = df.loc[(adm_id, year)].iloc[:, 0]
-            else:
-                if rs_var not in dataset._dfs_x:
-                    continue
-                df = dataset._dfs_x[rs_var]
-                if (adm_id, year) not in df.index:
-                    continue
-                rs_data = df.loc[(adm_id, year)].iloc[:, 0]
-
-            # For daily aggregation, interpolate directly to target_dates
-            if aggregation == "daily":
-                daily_val = interpolate_to_daily(rs_data, target_dates,
-                                                 interpolate_data='soil_moisture' if rs_var in ['ssm', 'rsm'] else rs_var)
-                rs_features[:, i] = daily_val.values
-            else:
-                # For weekly/dekad: interpolate to full daily range, then aggregate
-                freq = WEEKLY_FREQ if aggregation == "weekly" else DEKAD_FREQ
-                full_daily_range = pd.date_range(start=target_dates[0], end=target_dates[-1], freq='D')
-                daily_val_full = interpolate_to_daily(rs_data, full_daily_range,
-                                                      interpolate_data='soil_moisture' if rs_var in ['ssm', 'rsm'] else rs_var)
-                # Aggregate to target frequency
-                aggregated = pd.DataFrame({rs_var: daily_val_full}, index=full_daily_range).resample(freq).mean()
-                # Reindex to match exact target_dates
-                expected_index = pd.date_range(start=target_dates[0], periods=seq_len, freq=freq)
-                aggregated = aggregated.reindex(expected_index)  # Leave NaNs, normalization handles them
-                rs_features[:, i] = aggregated[rs_var].values
-        except Exception as e:
-            logging.warning(f"[{adm_id}] {rs_var} extraction error: {e}")
-
-    return rs_features
-
-
-def _extract_static_features(dataset: CYDataset, adm_id: str, year: int,
-                              include_spatial_features: bool,
-                              lat: Optional[float], lon: Optional[float],
-                              lag_years: int,
-                              daily_df: Optional[pd.DataFrame] = None,
-                              debug: bool = False) -> Tuple[np.ndarray, Optional[float], Optional[float]]:
-    """
-    Assemble the static feature vector for one location-year.
-
-    Feature order (MUST match _get_static_feature_names() exactly):
-      1. Soil properties
-      2. Location properties  →  also extracts lat/lon as side-effect
-      3. Crop calendar dates
-      4. Explicit lat/lon      (conditional)
-      5. Lagged yields         (conditional)
-
-    Args:
-        dataset: CY-Bench dataset
-        adm_id: Administrative region ID
-        year: Year to extract features for
-        include_spatial_features: Whether to include explicit lat/lon features
-        lat: Latitude hint (will be overwritten from location data)
-        lon: Longitude hint (will be overwritten from location data)
-        lag_years: Number of lagged yield features to include
-        daily_df: Unused (kept for compatibility)
-        debug: Enable debug logging (deprecated, use logging level)
-
-    Returns:
-        Tuple of (static_features_array, latitude, longitude)
-
-    NOTE ON LAG YIELD LEAKAGE: In operational forecasting, the lag yield for year t
-    is the *observed* yield from year t-1. For test year t, lag_yield_1 = y(t-1),
-    which may itself be a test year. This is realistic for operational use
-    (prior year yield is published before the current season ends) but means
-    the model has indirect access to test-set yield magnitudes. This is documented
-    here as an explicit assumption, not a bug.
-    """
-    static_vals = []
-
-    # 1. Soil properties
-    if "soil" in dataset._dfs_x:
-        try:
-            soil = dataset._dfs_x["soil"].loc[adm_id]
-            for prop in SOIL_PROPERTIES:
-                static_vals.append(float(soil.get(prop, np.nan)))
-        except Exception as e:
-            logging.warning(f"[{adm_id}] Soil extraction error: {e}")
-            static_vals.extend([np.nan] * len(SOIL_PROPERTIES))
-    else:
-        static_vals.extend([np.nan] * len(SOIL_PROPERTIES))
-
-    # 2. Location properties (also extracts lat/lon)
-    if "location" in dataset._dfs_x:
-        try:
-            loc = dataset._dfs_x["location"].loc[adm_id]
-            for prop in LOCATION_PROPERTIES:
-                val = loc.get(prop, np.nan)
-                static_vals.append(float(val) if val is not None else np.nan)
-                if prop == "latitude":
-                    lat = float(val) if val is not None else None
-                elif prop == "longitude":
-                    lon = float(val) if val is not None else None
-        except Exception as e:
-            logging.warning(f"[{adm_id}] Location extraction error: {e}")
-            static_vals.extend([np.nan] * len(LOCATION_PROPERTIES))
-    else:
-        static_vals.extend([np.nan] * len(LOCATION_PROPERTIES))
-
-    # 3. Crop calendar dates (with cyclic encoding for day-of-year features)
-    if ("crop_season" in dataset._dfs_x and
-            (adm_id, year) in dataset._dfs_x["crop_season"].index):
-        crop = dataset._dfs_x["crop_season"].loc[(adm_id, year)]
-    else:
-        crop = pd.Series([np.nan] * 4, index=CROP_CALENDAR_DATES)
-
-    for name, v in zip(CROP_CALENDAR_DATES, crop):
-        if isinstance(v, pd.Timestamp):
-            doy = float(v.dayofyear)
-        elif v is not None:
-            doy = float(v)
-        else:
-            doy = np.nan
-
-        # Cyclic encoding for day-of-year features (sos_date, eos_date)
-        # This ensures that DOY=365 and DOY=1 are treated as adjacent (1 day apart)
-        if name in ["sos_date", "eos_date"]:
-            if not np.isnan(doy):
-                cyclic_val = 2 * np.pi * doy / 365.0
-                static_vals.extend([np.sin(cyclic_val), np.cos(cyclic_val)])
-            else:
-                # Always append 2 values for cyclic features, even if NaN
-                static_vals.extend([np.nan, np.nan])
-        else:
-            # cutoff_date and season_window_length are linear, not cyclic
-            static_vals.append(doy)
-
-    # 4. Explicit spatial features
-    if include_spatial_features:
-        static_vals.append(lat if lat is not None else np.nan)
-        static_vals.append(lon if lon is not None else np.nan)
-
-    # 5. Lagged yields
-    for lag in range(1, lag_years + 1):
-        lag_value = np.nan
-        try:
-            if hasattr(dataset, '_data_target'):
-                v = dataset._data_target.loc[(adm_id, year - lag)]
-                lag_value = float(v.iloc[0] if isinstance(v, pd.Series) else v)
-            else:
-                indices = list(dataset.indices())
-                if (adm_id, year - lag) in indices:
-                    targets = list(dataset.targets())
-                    lag_value = float(targets[indices.index((adm_id, year - lag))])
-        except (KeyError, IndexError, ValueError):
-            pass
-        # Impute missing lags to NaN; normalization will convert to 0.0 in z-score space
-        static_vals.append(lag_value if not np.isnan(lag_value) else np.nan)
-
-    if lag_years > 0:
-        logging.debug(f"[{adm_id}] Added {lag_years} lagged yield features")
-
-    return np.array(static_vals, dtype=np.float32), lat, lon
-
-
-def _assemble_features(features: Dict, seq_len: int,
-                       use_sota_features: bool,
-                       weather_features_list: List[str]) -> np.ndarray:
-    """
-    Concatenate time series feature arrays in consistent column order.
-
-    Now accepts weather_features_list parameter instead of using global.
-    """
-    n_weather = len(weather_features_list)
-    n_rs = len(REMOTE_SENSING_FEATURES)      # 4
-    n_sota = len(SOTA_TEMPORAL_VARS_LIST) if use_sota_features else 0
-
-    X = np.zeros((seq_len, n_weather + n_rs + n_sota), dtype=np.float32)
-    col = 0
-
-    if 'weather' in features:
-        # Assert exact shape match - _extract_weather_features now guarantees this
-        assert features['weather'].shape == (seq_len, n_weather), (
-            f"Weather shape mismatch: expected ({seq_len}, {n_weather}), "
-            f"got {features['weather'].shape}. This indicates a bug in "
-            "_extract_weather_features - it should always return n_weather columns."
-        )
-        X[:, col:col + n_weather] = features['weather']
-    col += n_weather
-
-    if 'remote_sensing' in features:
-        assert features['remote_sensing'].shape == (seq_len, n_rs)
-        X[:, col:col + n_rs] = features['remote_sensing']
-    col += n_rs
-
-    if use_sota_features and 'sota_temporal' in features:
-        assert features['sota_temporal'].shape == (seq_len, n_sota)
-        X[:, col:col + n_sota] = features['sota_temporal']
-
-    return X
-
-def build_daily_input_sequence(
-        dataset: CYDataset, adm_id: str, year: int,
-        aggregation: str = "dekad",
-        use_sota_features: bool = False,
-        include_spatial_features: bool = False,
-        lag_years: int = 0,
-        weather_features_list: Optional[List[str]] = None,
-        debug: bool = False,
-) -> Tuple[np.ndarray, np.ndarray, float, Dict, np.ndarray]:
-    """
-    Build model-ready input for one location-year.
-
-    Args:
-        dataset: CY-Bench dataset
-        adm_id: Administrative region ID
-        year: Year to extract data for
-        aggregation: Temporal aggregation ('daily', 'weekly', 'dekad')
-        use_sota_features: Include SOTA temporal features
-        include_spatial_features: Include explicit lat/lon features
-        lag_years: Number of lagged yield features (max 2)
-        weather_features_list: List of weather features to extract (from config.weather_features)
-        debug: Enable debug logging (deprecated, use logging level)
-
-    Returns:
-        X_ts: Time series features of shape (seq_len, n_ts_features)
-        X_static: Static features of shape (n_static_features,)
-        y: Target yield (original scale)
-        meta: Dictionary with adm_id, year, lat, lon, and shapes
-        validity_mask: Boolean array of shape (seq_len,) for data validity
-    """
-    # Default to base weather features if not specified
-    if weather_features_list is None:
-        weather_features_list = WEATHER_FEATURES_BASE
-
-    logging.debug(f"Building sequence: {adm_id}, {year}, {aggregation}")
-
-    # Crop season trimming
-    crop_season_info = None
-    if ("crop_season" in dataset._dfs_x and
-            (adm_id, year) in dataset._dfs_x["crop_season"].index):
-        crop_season_info = dataset._dfs_x["crop_season"].loc[(adm_id, year)]
-
-    target_dates, seq_len, freq_str = _get_aggregation_params(aggregation, year, crop_season_info)
-
-    features = {}
-    # Pass weather_features_list to extraction function
-    features['weather'] = _extract_weather_features(
-        dataset, adm_id, year, target_dates, aggregation, weather_features_list, debug)
-    features['remote_sensing'] = _extract_remote_sensing_features(
-        dataset, adm_id, year, target_dates, aggregation, debug)
-
-    # SOTA temporal features with crop-calendar-relative position
-    # Pass sos_date and eos_date from crop_season_info for meaningful season-relative features
-    if use_sota_features:
-        sos_date = crop_season_info.get('sos_date') if crop_season_info is not None else None
-        eos_date = crop_season_info.get('eos_date') if crop_season_info is not None else None
-        sota = create_sota_temporal_features(target_dates, sos_date=sos_date, eos_date=eos_date)
-        if aggregation == "daily":
-            features['sota_temporal'] = sota
-        else:
-            freq = WEEKLY_FREQ if aggregation == "weekly" else DEKAD_FREQ
-            # Resample and reindex to ensure exact shape match
-            sota_df = pd.DataFrame(sota, index=target_dates)
-            resampled = sota_df.resample(freq).mean()
-            expected_index = pd.date_range(start=target_dates[0], periods=len(target_dates), freq=freq)
-            resampled = resampled.reindex(expected_index)  # Leave NaNs, normalization handles them
-            features['sota_temporal'] = resampled.values
-
-    # Static features
-    features['static'], lat, lon = _extract_static_features(
-        dataset, adm_id, year, include_spatial_features, None, None,
-        lag_years,
-        daily_df=None,  # No GDD growth stage features
-        debug=debug,
-    )
-
-    # Target yield
-    try:
-        if hasattr(dataset, '_data_target'):
-            v = dataset._data_target.loc[(adm_id, year)]
-            y = float(v.iloc[0] if isinstance(v, pd.Series) else v)
-        else:
-            indices = list(dataset.indices())
-            targets = list(dataset.targets())
-            y = float(targets[indices.index((adm_id, year))])
-    except Exception as e:
-        logging.warning(f"[{adm_id}] Target extraction error: {e}")
-        y = 0.0
-
-    # Pass weather_features_list to _assemble_features
-    X_ts = _assemble_features(features, seq_len, use_sota_features, weather_features_list)
-    X_static = features['static'].astype(np.float32)
-
-    logging.debug(f"[{adm_id}] X_ts={X_ts.shape}, X_static={X_static.shape}")
-
-    # --- Pad and mask to handle variable sequence lengths ---
-    max_len = MAX_SEQ_LENS[aggregation]
-    actual_len = X_ts.shape[0]
-
-    if actual_len >= max_len:
-        # Truncate if longer than max (shouldn't happen, but safety check)
-        X_ts_out = X_ts[:max_len]
-        observed_mask = np.ones(max_len, dtype=bool)
-    else:
-        # Pad with zeros and create mask
-        pad_len = max_len - actual_len
-        X_ts_out = np.concatenate([
-            X_ts,
-            np.zeros((pad_len, X_ts.shape[1]), dtype=np.float32)
-        ], axis=0)
-        observed_mask = np.concatenate([
-            np.ones(actual_len, dtype=bool),
-            np.zeros(pad_len, dtype=bool)
-        ])
-
-    meta = {"adm_id": adm_id, "year": year, "lat": lat, "lon": lon,
-            "seq_len": actual_len, "padded_len": X_ts_out.shape[0],
-            "n_ts": X_ts_out.shape[1], "n_static": X_static.shape[0]}
-
-    # validity_mask is now the observed_mask for compatibility
-    validity_mask = observed_mask
-
-    return X_ts_out, X_static, y, meta, validity_mask
-
 # %% Dataset Wrapper
 class DailyYieldDataset(Dataset):
     """PyTorch Dataset wrapping pre-computed arrays for one data split."""
@@ -801,7 +151,7 @@ class DailyCYBenchSeqDataModule(pl.LightningDataModule):
     def __init__(self, config: Union[TSTModelConfig, LinearModelConfig]):
         super().__init__()
         # Ignore config in save_hyperparameters to avoid circular checkpoint references
-        # (TSTModelConfig or LinearModelConfig contains load_checkpoint which could point to another checkpoint)
+        # (ModelConfig contains load_checkpoint which could point to another checkpoint)
         self.save_hyperparameters(ignore=['config'])
         self.config = config
         self.y_mean = self.y_std = None
@@ -874,6 +224,11 @@ class DailyCYBenchSeqDataModule(pl.LightningDataModule):
                     include_spatial_features=cfg.include_spatial_features,
                     lag_years=cfg.lag_years,
                     weather_features_list=cfg.weather_features,  # Pass from config
+                    use_gdd=cfg.use_gdd,
+                    use_heat_stress_days=cfg.use_heat_stress_days,
+                    use_rue=cfg.use_rue,
+                    use_farquhar=cfg.use_farquhar,
+                    crop=cfg.crop,
                 )
                 all_X_ts.append(X_ts)
                 all_X_static.append(X_static)
@@ -1017,8 +372,23 @@ class DailyCYBenchSeqDataModule(pl.LightningDataModule):
         return params
 
     def _get_ts_feature_names(self) -> List[str]:
-        # Use config.weather_features instead of global WEATHER_FEATURES
+        """
+        Return ordered list of time series feature names.
+
+        Order matches the column order in the assembled time series array:
+          1. Base weather features
+          2. Domain features (GDD, RUE, Farquhar) - when enabled
+          3. Remote sensing features
+          4. SOTA temporal features - when enabled
+        """
         names = [f'weather_{n}' for n in self.config.weather_features]
+        # Domain time series channels, in the order they are appended
+        if self.config.use_gdd:
+            names.append('domain_cum_gdd')
+        if self.config.use_rue:
+            names.append('domain_rue_index')
+        if self.config.use_farquhar:
+            names.append('domain_farquhar_proxy')
         names += [f'rs_{n}' for n in REMOTE_SENSING_FEATURES]
         if self.config.use_sota_features:
             names += [f'sota_{n}' for n in SOTA_TEMPORAL_VARS_LIST]
@@ -1029,6 +399,7 @@ class DailyCYBenchSeqDataModule(pl.LightningDataModule):
         return _get_static_feature_names(
             self.config.include_spatial_features,
             self.config.lag_years,
+            self.config.use_heat_stress_days,
         )
 
     def train_dataloader(self):

@@ -47,6 +47,11 @@ class TSTModelConfig:
     drop_tavg: bool = False  # Drop tavg if dataset computes it as (tmin+tmax)/2
     # Recursive lag prediction for true out-of-sample testing
     use_recursive_lags: bool = False  # Use predicted yields as lags during testing (default: False for backward compat)
+    # Domain feature engineering flags
+    use_gdd: bool = False # GDD time series channel
+    use_heat_stress_days: bool = False  # Heat stress static counts
+    use_rue: bool = False           # RUE index time series channel
+    use_farquhar: bool = False      # Farquhar proxy time series channel 
     # Results directory for CSV output
     results_dir: str = "checkpoints/results"
 
@@ -92,8 +97,10 @@ class TSTModelConfig:
                 n_crop += 1
         n_spatial = 2 if self.include_spatial_features else 0
         n_lagged = self.lag_years
+        # Heat stress: 7 scalar features when enabled
+        n_heat_stress = 7 if self.use_heat_stress_days else 0 
 
-        return n_soil + n_location + n_crop + n_spatial + n_lagged
+        return n_soil + n_location + n_crop + n_spatial + n_lagged + n_heat_stress
     
 
 @dataclass
@@ -121,6 +128,11 @@ class LinearModelConfig:
     use_revIN: bool = False  # Use RevIN normalization for XLinear endogenous series
     # Recursive lag prediction for true out-of-sample testing
     use_recursive_lags: bool = False  # Use predicted yields as lags during testing (default: False for backward compat)
+    # Domain feature engineering flags
+    use_gdd: bool = False # GDD time series channel
+    use_heat_stress_days: bool = False  # Heat stress static counts
+    use_rue: bool = False # RUE index time series channel
+    use_farquhar: bool = False # Farquhar proxy time series channel 
     # Results directory for CSV output
     results_dir: str = "checkpoints/results"
 
@@ -160,4 +172,7 @@ class LinearModelConfig:
         n_spatial = 2 if self.include_spatial_features else 0
         n_lagged = self.lag_years
 
-        return n_soil + n_location + n_crop + n_spatial + n_lagged
+        # Heat stress: 7 scalar features when enabled
+        n_heat_stress = 7 if self.use_heat_stress_days else 0 
+
+        return n_soil + n_location + n_crop + n_spatial + n_lagged + n_heat_stress

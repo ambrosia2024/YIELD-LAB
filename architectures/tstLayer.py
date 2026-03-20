@@ -72,7 +72,7 @@ from modelconfig import TSTModelConfig
 
 sys.path.append('../process/')
 from validateModel import ModelMetrics
-from loadData import _get_static_feature_names
+from featureEngineering import _get_static_feature_names
 
 # Global variables
 SOTA_TEMPORAL_VARS_LIST = [
@@ -113,8 +113,10 @@ class BaseTimeSeriesModel(ABC, pl.LightningModule):
         # Use config.time_series_vars property instead of global WEATHER_FEATURES
         # This ensures feature count matches the actual features being extracted
         use_sota = config.use_sota_features
+        n_domain_ts = sum([config.use_gdd, config.use_rue, config.use_farquhar])
         self.n_ts_features = (
             len(config.time_series_vars)
+            + n_domain_ts
             + (len(SOTA_TEMPORAL_VARS_LIST) if use_sota else 0)
         )
         # When using SOTA features, they're passed through past_values, not as time features
@@ -124,6 +126,7 @@ class BaseTimeSeriesModel(ABC, pl.LightningModule):
         # Static feature count — must match _compute_expected_static_features()
         include_spatial = config.include_spatial_features
         lag_years = config.lag_years
+        n_heat_stress = 7 if config.use_heat_stress_days else 0
 
         # Compute n_crop_calendar dynamically from CROP_CALENDAR_DATES
         # using the same cyclic-encoding logic as _compute_expected_static_features().
@@ -140,6 +143,7 @@ class BaseTimeSeriesModel(ABC, pl.LightningModule):
             len(SOIL_PROPERTIES) + len(LOCATION_PROPERTIES) + n_crop_calendar
             + (2 if include_spatial else 0)
             + lag_years
+            + n_heat_stress
         )
 
         print(f"[Model] TS features={self.n_ts_features}, Static features={self.n_static_features}")
@@ -147,7 +151,7 @@ class BaseTimeSeriesModel(ABC, pl.LightningModule):
         # Flag for tracking model build completion (used by _verify_mask_is_used)
         self._model_ready = False
 
-        #  _build_model() is the correct abstract method name.
+        # _build_model() is the correct abstract method name.
         # The previous name _extract_static_features_build_model was a copy-paste
         # error that silently broke ABC enforcement — subclasses implementing
         # _build_model() were never actually required to by the base class.
@@ -195,7 +199,7 @@ class BaseTimeSeriesModel(ABC, pl.LightningModule):
         """
         Thin wrapper so _normalize_and_impute_static() can look up norm params.
 
-         Previously this method only existed on DailyCYBenchSeqDataModule.
+        Previously this method only existed on DailyCYBenchSeqDataModule.
         _normalize_and_impute_static() called self._get_static_feature_names(),
         raising AttributeError on the very first training batch. Adding it here
         (delegating to the shared module-level function) fixes the crash without
@@ -204,6 +208,7 @@ class BaseTimeSeriesModel(ABC, pl.LightningModule):
         return _get_static_feature_names(
             self.config.include_spatial_features,
             self.config.lag_years,
+            self.config.use_heat_stress_days,
         )
 
     # -- Hidden state extraction and pooling helpers -------------------------
@@ -305,8 +310,15 @@ class BaseTimeSeriesModel(ABC, pl.LightningModule):
                 raise RuntimeError("feature_norm_params not set and no trainer available.")
 
         # Use config.weather_features instead of global WEATHER_FEATURES
-        names = ([f'weather_{f}' for f in self.config.weather_features]
-                 + [f'rs_{f}' for f in REMOTE_SENSING_FEATURES])
+        names = [f'weather_{f}' for f in self.config.weather_features]
+        # Domain time series channels — must match order in _get_ts_feature_names()
+        if self.config.use_gdd:
+            names.append('domain_cum_gdd')
+        if self.config.use_rue:
+            names.append('domain_rue_index')
+        if self.config.use_farquhar:
+            names.append('domain_farquhar_proxy')
+        names += [f'rs_{f}' for f in REMOTE_SENSING_FEATURES]
         if self.config.use_sota_features:
             names += [f'sota_{n}' for n in SOTA_TEMPORAL_VARS_LIST]
 

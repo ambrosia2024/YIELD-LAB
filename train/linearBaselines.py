@@ -61,8 +61,11 @@ Other optional/advanced features:
 
 4. FEATURE ABLATION TOGGLES
    --use_cwb_feature: Include crop water balance (redundant with prec+temp)
-   --drop_tavg:       Drop average temperature if dataset computes it as (tmin+tmax)/2
-
+   --drop_tavg: Drop average temperature if dataset computes it as (tmin+tmax)/2
+   --use_gdd : Adds cumulative GDD as a time series channel
+   --use_heat_stress_days: Adds heat/frost/dry stress day counts as static features
+   --use_rue: Adds RUE (Radiation Use Efficiency) index as a time series channel
+   --use_farquhar: Adds Farquhar photosynthesis proxy as a time series channel
 
 -------------
 Training workflow:
@@ -200,6 +203,20 @@ if __name__ == "__main__":
     parser.add_argument('--use_residual_trend', action='store_true')
     parser.add_argument('--use_recursive_lags', action='store_true',
                         help='Use predicted yields as lags during testing (true out-of-sample)')
+    # Domain feature engineering flags
+    parser.add_argument('--use_gdd', action='store_true',
+                        help='Add cumulative GDD as a time series channel. '
+                             'Uses crop-specific base/upper thresholds from cybench.config. '
+                             'GDD = max(min(Tavg, Tupper) - Tbase, 0), then cumsum.')
+    parser.add_argument('--use_heat_stress_days', action='store_true',
+                        help='Add heat/frost/dry stress day counts as static features. '
+                             'Captures threshold exceedance events missed by averages.')
+    parser.add_argument('--use_rue', action='store_true',
+                        help='Add RUE (Radiation Use Efficiency) index as a time series channel. '
+                             'RUE = cumPAR * T_stress * W_stress. Experimental.')
+    parser.add_argument('--use_farquhar', action='store_true',
+                        help='Add Farquhar photosynthesis proxy as a time series channel. '
+                             'Based on FvCB C3 model. Seasonal-scale approximation only.')
     parser.add_argument('--num_workers', type=int, default=0,
                         help='DataLoader workers (default: 0 for HPC compatibility)')
     parser.add_argument('--test_years', type=int, default=3,
@@ -227,6 +244,8 @@ if __name__ == "__main__":
     print(f"  SOTA={args.use_sota_features}  Spatial={args.include_spatial_features}  "
           f"Lag={args.lag_years}  RevIN={args.use_revIN}")
     print(f"  RecursiveLags={args.use_recursive_lags}  ResidualTrend={args.use_residual_trend}")
+    print(f"  Domain features: GDD={args.use_gdd}  HeatStress={args.use_heat_stress_days}  "
+          f"RUE={args.use_rue}  Farquhar={args.use_farquhar}")
     print(f"  TestYears={args.test_years}")
     print(f"  lr={args.lr}  wd={args.weight_decay}  epochs={args.epochs}  "
           f"batch={args.batch_size}  seed={args.seed}")
@@ -245,6 +264,10 @@ if __name__ == "__main__":
         test_years=args.test_years,
         use_residual_trend=args.use_residual_trend,
         use_recursive_lags=args.use_recursive_lags,
+        use_gdd=args.use_gdd,
+        use_heat_stress_days=args.use_heat_stress_days,
+        use_rue=args.use_rue,
+        use_farquhar=args.use_farquhar,
         use_cwb_feature=args.use_cwb_feature,
         drop_tavg=args.drop_tavg,
         use_revIN=args.use_revIN,

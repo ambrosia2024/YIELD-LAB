@@ -51,8 +51,11 @@ class BaseTimeSeriesModel(ABC, pl.LightningModule):
         self.feature_norm_params: Optional[Dict] = None
 
         use_sota = config.use_sota_features
+        # Domain features (GDD, RUE, Farquhar) are additional TS channels beyond base weather
+        n_domain_ts = sum([config.use_gdd, config.use_rue, config.use_farquhar])
         self.n_ts_features = (
             len(config.time_series_vars)
+            + n_domain_ts
             + (len(SOTA_TEMPORAL_VARS_LIST) if use_sota else 0)
         )
         self.num_time_features = 0
@@ -67,10 +70,14 @@ class BaseTimeSeriesModel(ABC, pl.LightningModule):
             else:
                 n_crop_calendar += 1
 
+        # Heat stress: 7 scalar features when enabled
+        n_heat_stress = 7 if config.use_heat_stress_days else 0
+
         self.n_static_features = (
             len(SOIL_PROPERTIES) + len(LOCATION_PROPERTIES) + n_crop_calendar
             + (2 if include_spatial else 0)
             + lag_years
+            + n_heat_stress
         )
 
         print(f"[Model] TS features={self.n_ts_features}, Static features={self.n_static_features}")
@@ -99,12 +106,15 @@ class BaseTimeSeriesModel(ABC, pl.LightningModule):
         return _get_static_feature_names(
             self.config.include_spatial_features,
             self.config.lag_years,
+            self.config.use_heat_stress_days,
         )
 
     def _normalize_time_series(self, x_ts: torch.Tensor,
                                 observed_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Z-score normalise each time series feature using training statistics.
+
+        Now includes domain feature names (GDD, RUE, Farquhar) when enabled.
         """
         if self.feature_norm_params is None:
             if hasattr(self, 'trainer') and self.trainer is not None:
@@ -116,8 +126,17 @@ class BaseTimeSeriesModel(ABC, pl.LightningModule):
             else:
                 raise RuntimeError("feature_norm_params not set and no trainer available.")
 
-        names = ([f'weather_{f}' for f in self.config.weather_features]
-                 + [f'rs_{f}' for f in REMOTE_SENSING_FEATURES])
+        names = [f'weather_{f}' for f in self.config.weather_features]
+
+        # Domain features (appended after base weather)
+        if self.config.use_gdd:
+            names.append('domain_cum_gdd')
+        if self.config.use_rue:
+            names.append('domain_rue_index')
+        if self.config.use_farquhar:
+            names.append('domain_farquhar_proxy')
+
+        names += [f'rs_{f}' for f in REMOTE_SENSING_FEATURES]
         if self.config.use_sota_features:
             names += [f'sota_{n}' for n in SOTA_TEMPORAL_VARS_LIST]
 
@@ -496,6 +515,7 @@ class BaseTimeSeriesModel(ABC, pl.LightningModule):
     def _compute_per_year_metrics_from_preds(self) -> dict:
         """Compute per-year metrics from accumulated predictions using torchmetrics."""
         results = {}
+
         for year, data in self._per_year_preds.items():
             if len(data['preds']) == 0:
                 continue
