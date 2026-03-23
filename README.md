@@ -74,3 +74,7 @@ cd train/
 sbatch run_baselines.sh
 ```
 
+# Model Checkpoints
+
+All the trained checkpoints are available at [Hugging Face](https://huggingface.co/Ambrosia2024/Yield-Hub) repository.
+
