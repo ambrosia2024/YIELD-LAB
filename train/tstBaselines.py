@@ -100,7 +100,7 @@ Usage:
     python tstBaselines.py --crop maize --country NL --model_type tst --use_sota_features --use_residual_trend --use_recursive_lags --use_cwb_feature --aggregation daily
 
 # Quick test run (5 epochs)
-    python tstBaselines.py --crop maize --country NL --model_type tsmixer --epochs 5 --aggregation daily --test_years 5
+    python tstBaselines.py --crop wheat --country BE --model_type tsmixer --epochs 5 --aggregation daily --test_years 5 --results_dir checkpoints-test/results
 
 
 ------------
@@ -144,8 +144,7 @@ from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 # CY-BENCH Dependencies
 from cybench.datasets.configured import load_dfs_crop
 from cybench.datasets.dataset import Dataset as CYDataset
-from cybench.config import (
-    GDD_BASE_TEMP, GDD_UPPER_LIMIT, LOCATION_PROPERTIES, SOIL_PROPERTIES,
+from cybench.config import (LOCATION_PROPERTIES, SOIL_PROPERTIES,
     FORECAST_LEAD_TIME, KEY_LOC, KEY_YEAR, KEY_TARGET, KEY_DATES, KEY_CROP_SEASON,
     CROP_CALENDAR_DATES
 )
@@ -325,7 +324,7 @@ if __name__ == "__main__":
     # WandB logger for final model
     try:
         wandb_logger = WandbLogger(
-            project="CYBENCH-LSTF-test",
+            project="CYBENCH-LSTF-AAAI",
             name=f"{args.model_type}-{args.crop}-{args.country}-final",
             config=vars(args),
             group=f"{args.crop}-{args.country}"
@@ -404,11 +403,21 @@ if __name__ == "__main__":
         if f'{metric}_overall' in per_year_metrics:
             print(f"    {metric.upper()}: {per_year_metrics[f'{metric}_overall']:.4f}")
 
-    # Save to CSV
+    # Save to CSV - extract actual years from test results (not from fixed_splits)
+    # This handles cases where the datamodule gets reconfigured during final training
+    actual_test_years = set()
+    for key in per_year_metrics.keys():
+        if key.endswith('_overall'):
+            continue
+        # Extract year from keys like 'nrmse_2015', 'mape_2017', etc.
+        parts = key.rsplit('_', 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            actual_test_years.add(int(parts[1]))
+
     save_test_results_to_csv(
         config=config,
         test_results=per_year_metrics,
-        test_years=fixed_splits['test_years'],
+        test_years=sorted(actual_test_years),
         run_id=run_id,
         timestamp=timestamp
     )

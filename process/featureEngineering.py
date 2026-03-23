@@ -8,7 +8,7 @@ from typing import Optional, Dict, List, Tuple
 from cybench.datasets.dataset import Dataset as CYDataset
 
 from cybench.config import (
-    GDD_BASE_TEMP, GDD_UPPER_LIMIT, LOCATION_PROPERTIES, SOIL_PROPERTIES,
+    LOCATION_PROPERTIES, SOIL_PROPERTIES,
     FORECAST_LEAD_TIME, KEY_LOC, KEY_YEAR, KEY_TARGET, KEY_DATES, KEY_CROP_SEASON,
     CROP_CALENDAR_DATES
 )
@@ -29,6 +29,17 @@ RS_VALID_RANGES = {
     'ndvi': (0.1, 1.0),    # 0.1 minimum for vegetated agricultural surfaces
     'ssm':  (0.0, 1.0),
     'rsm':  (0.0, 1.0),
+}
+
+# Override GDD values with literature-based calibration
+# https://www.sciencedirect.com/science/article/pii/S037837742500469X
+GDD_BASE_TEMP = {
+    'maize': 10.0,   # °C — Kumudini 2014, Stewart 1998, Mederski 1973
+    'wheat': 0.0,    # °C — McMaster 1988, Raes 2023, Kukal 2020
+}
+GDD_UPPER_LIMIT = {
+    'maize': 30.0,   # °C — Stewart 1998, Raes 2023, Martins 2019
+    'wheat': 26.0,   # °C — Raes 2023 AquaCrop calibration
 }
 
 DEKAD_FREQ = "10D"
@@ -953,11 +964,11 @@ def build_daily_input_sequence(
     if weather_features_list is None:
         weather_features_list = WEATHER_FEATURES_BASE
 
-    # Crop-specific GDD thresholds from cybench.config
-    # Base temp: 8°C maize (standard), 5°C wheat/other
-    # Upper temp: 30°C maize, 25°C wheat/other (development stops above this)
-    gdd_base = float(GDD_BASE_TEMP.get(crop, 8.0 if crop == 'maize' else 5.0))
-    gdd_upper = float(GDD_UPPER_LIMIT.get(crop, 30.0 if crop == 'maize' else 25.0))
+    # Crop-specific GDD thresholds from literature-based calibration
+    # Base temp: 10°C maize, 0°C wheat (McMaster 1988, Raes 2023), 5°C other crops
+    # Upper temp: 30°C maize, 26°C wheat (Raes 2023 AquaCrop), 30°C other crops
+    gdd_base = float(GDD_BASE_TEMP.get(crop, 10.0 if crop == 'maize' else 0.0 if crop == 'wheat' else 5.0))
+    gdd_upper = float(GDD_UPPER_LIMIT.get(crop, 30.0 if crop == 'maize' else 26.0 if crop == 'wheat' else 30.0))
 
     logging.debug(f"Building sequence: {adm_id}, {year}, {aggregation}")
 

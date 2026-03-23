@@ -139,12 +139,22 @@ def save_test_results_to_csv(
         year_columns = {str(year): test_results.get(f'{metric}_{year}', None) for year in test_years}
         year_columns['overall'] = test_results.get(f'{metric}_overall', None)
         row_data = {**base_data, **year_columns}
-        
+
         if os.path.exists(csv_path):
-            df = pd.read_csv(csv_path)
-            df = pd.concat([df, pd.DataFrame([row_data])], ignore_index=True)
+            df = pd.read_csv(csv_path, on_bad_lines='skip')
+            new_df = pd.DataFrame([row_data])
+            # pandas automatically aligns columns and adds new ones
+            df = pd.concat([df, new_df], ignore_index=True)
         else:
             df = pd.DataFrame([row_data])
-        
+
+        # Enforce consistent column order: metadata -> config -> years (sorted) -> overall
+        def get_column_order(cols):
+            metadata_cols = ['timestamp', 'run_id']
+            year_cols = sorted([c for c in cols if c.isdigit() and len(c) == 4])
+            other_cols = [c for c in cols if c not in metadata_cols + year_cols + ['overall']]
+            return metadata_cols + other_cols + year_cols + ['overall']
+
+        df = df[get_column_order(df.columns)]
         df.to_csv(csv_path, index=False)
         print(f"[CSV Results] Saved {metric} results to {csv_path}")
