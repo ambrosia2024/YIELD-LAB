@@ -531,7 +531,6 @@ class BaseTimeSeriesModel(ABC, pl.LightningModule):
             mape = MeanAbsolutePercentageError()
 
             mse_val = mse(preds, targets)
-            r2_val = r2(preds, targets)
             mae_val = mae(preds, targets)
             mape_val = mape(preds, targets)
             rmse_val = torch.sqrt(mse_val)
@@ -539,6 +538,12 @@ class BaseTimeSeriesModel(ABC, pl.LightningModule):
             # SMAPE - manual computation
             smape_val = torch.mean(2.0 * torch.abs(preds - targets) /
                                   (torch.abs(preds) + torch.abs(targets) + 1e-8))
+
+            # R² score requires at least 2 samples
+            if len(preds) >= 2:
+                r2_val = r2(preds, targets)
+            else:
+                r2_val = torch.tensor(float('nan'))  # Cannot compute R² with single sample
 
             # Store results with year suffix
             results[f'mse_{year}'] = mse_val.item()
@@ -569,13 +574,18 @@ class BaseTimeSeriesModel(ABC, pl.LightningModule):
             mape_overall = MeanAbsolutePercentageError()
 
             mse_val = mse_overall(all_preds_tensor, all_targets_tensor)
-            r2_val = r2_overall(all_preds_tensor, all_targets_tensor)
             mae_val = mae_overall(all_preds_tensor, all_targets_tensor)
             mape_val = mape_overall(all_preds_tensor, all_targets_tensor)
             rmse_val = torch.sqrt(mse_val)
             smape_val = torch.mean(2.0 * torch.abs(all_preds_tensor - all_targets_tensor) /
                                   (torch.abs(all_preds_tensor) + torch.abs(all_targets_tensor) + 1e-8))
             nrmse_val = rmse_val / (all_targets_tensor.mean().clamp(min=1e-8))
+
+            # R² score requires at least 2 samples
+            if len(all_preds_tensor) >= 2:
+                r2_val = r2_overall(all_preds_tensor, all_targets_tensor)
+            else:
+                r2_val = torch.tensor(float('nan'))  # Cannot compute R² with single sample
 
             results['mse_overall'] = mse_val.item()
             results['mae_overall'] = mae_val.item()
@@ -661,7 +671,13 @@ class BaseTimeSeriesModel(ABC, pl.LightningModule):
         }
 
     def configure_optimizers(self):
-        return torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        if self.config.lr_scheduler_lambda is not None:
+            scheduler = torch.optim.lr_scheduler.LambdaLR(
+                optimizer, lr_lambda=self.config.lr_scheduler_lambda
+            )
+            return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "interval": "epoch"}}
+        return optimizer
 
     def on_fit_start(self):
         """Log model size to wandb at the start of training."""
@@ -775,7 +791,9 @@ class NLinearYieldModel(BaseTimeSeriesModel):
 
         # Concatenate with static features and predict yield
         combined = torch.cat([pooled, x_static], dim=-1)
-        return self.regression_head(combined).squeeze(-1)
+        predictions = self.regression_head(combined).squeeze(-1)
+
+        return predictions
 
 
 class DLinearYieldModel(BaseTimeSeriesModel):
@@ -893,7 +911,9 @@ class DLinearYieldModel(BaseTimeSeriesModel):
         pooled = (trend_out + remainder_out).squeeze(-1)
 
         combined = torch.cat([pooled, x_static], dim=-1)
-        return self.regression_head(combined).squeeze(-1)
+        predictions = self.regression_head(combined).squeeze(-1)
+
+        return predictions
 
 
 class RevIN(nn.Module):
@@ -1018,7 +1038,9 @@ class RLinearYieldModel(BaseTimeSeriesModel):
 
         # Concatenate static features and predict yield
         combined = torch.cat([pooled, x_static], dim=-1)
-        return self.regression_head(combined).squeeze(-1)
+        predictions = self.regression_head(combined).squeeze(-1)
+
+        return predictions
 
 
 class XLinearGatingBlock(nn.Module):
@@ -1253,7 +1275,9 @@ class XLinearYieldModel(BaseTimeSeriesModel):
             x_static,
         ], dim=-1)
 
-        return self.regression_head(combined).squeeze(-1)
+        predictions = self.regression_head(combined).squeeze(-1)
+
+        return predictions
 
 
 # =========================================================

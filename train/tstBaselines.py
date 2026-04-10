@@ -7,12 +7,14 @@ Description: A time series transformers based crop yield prediction framework th
 Python version: 3.12.0
 
 --------------------
-Architecture overview: This script implements a unified interface to five transformer-based time series architectures from the HuggingFace Transformers library:
+Architecture overview: This script implements a unified interface to seven transformer-based time series architectures from the HuggingFace Transformers library and nixtla implementations:
     • Autoformer: Auto-correlation mechanism for long-term dependency discovery (https://arxiv.org/abs/2106.13008)
     • PatchTST: Patch time series into sub-sequences for efficient processing (https://arxiv.org/pdf/2211.14730)
     • TSMixer: All-MLP architecture with mixing layers (via PatchTSMixer) (https://arxiv.org/pdf/2303.06053)
     • Informer: ProbSparse self-attention for long sequences (https://arxiv.org/pdf/2012.07436)
     • TST: Vanilla time series transformer with canonical attention (https://arxiv.org/pdf/2010.02803)
+    • iTransformer: Inverted transformer treating channels as tokens for cross-variable dependencies (https://arxiv.org/abs/2310.06625)
+    • TimeXer: Cross-attention transformer with endogenous patching and exogenous inverted embedding (https://arxiv.org/abs/2402.19072)
 
 All models share a common base class (BaseTimeSeriesModel) ensuring consistent training, evaluation, and inference interfaces.
 
@@ -99,6 +101,10 @@ Usage:
 # Use all SOTA features (Fourier encoding + residual trend + recursive lags)
     python tstBaselines.py --crop maize --country NL --model_type tst --use_sota_features --use_residual_trend --use_recursive_lags --use_cwb_feature --aggregation daily
 
+# iTransformer for cross-variable dependencies: python tstBaselines.py --crop maize --country NL --model_type itransformer --epochs 50 --aggregation dekad
+
+# TimeXer with exogenous variable handling: python tstBaselines.py --crop wheat --country BE --model_type timexer --epochs 50 --aggregation daily
+
 # Quick test run (5 epochs)
     python tstBaselines.py --crop wheat --country BE --model_type tsmixer --epochs 5 --aggregation daily --test_years 5 --results_dir checkpoints-test/results
 
@@ -139,7 +145,7 @@ import torch
 
 from lightning.pytorch import Trainer
 from lightning.pytorch.loggers import WandbLogger, CSVLogger
-from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
 
 # CY-BENCH Dependencies
 from cybench.datasets.configured import load_dfs_crop
@@ -177,7 +183,7 @@ if __name__ == "__main__":
     parser.add_argument('--crop', default="maize")
     parser.add_argument('--country', default="NL")
     parser.add_argument('--model_type', default="autoformer",
-                        choices=['autoformer', 'patchtst', 'tsmixer', 'informer', 'tst'])
+                        choices=['autoformer', 'patchtst', 'tsmixer', 'informer', 'tst', 'itransformer', 'timexer'])
     parser.add_argument('--aggregation', default="dekad",
                         choices=['daily', 'weekly', 'dekad'])
     parser.add_argument('--use_sota_features', action='store_true')
@@ -226,6 +232,12 @@ if __name__ == "__main__":
     parser.add_argument('--drop_tavg', action='store_true',
                         help='Drop tavg feature if dataset computes it as (tmin+tmax)/2, '
                              'which carries no additional information beyond tmin/tmax.')
+    parser.add_argument('--lr_decay_every', type=int, default=None,
+                        help='Decay learning rate by half every N epochs (default: None, no decay)')
+    parser.add_argument('--wandb_project', default=None,
+                        help='Custom WandB project name (default: CYBENCH-LSTF-AAAI2027)')
+    parser.add_argument('--wandb_run_name', default=None,
+                        help='Custom WandB run name (default: model_type-crop-country)')
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -248,6 +260,14 @@ if __name__ == "__main__":
           f"batch={args.batch_size}  seed={args.seed}")
     print(f"{'=' * 70}\n")
 
+    # Create LR scheduler lambda if requested
+    lr_scheduler_lambda = None
+    if args.lr_decay_every is not None:
+        def lr_scheduler_lambda(epoch):
+            decay_factor = args.lr_decay_every
+            decay_steps = epoch // decay_factor
+            return 0.5 ** decay_steps
+
     config = TSTModelConfig(
         crop=args.crop, country=args.country,
         model_type=args.model_type, aggregation=args.aggregation,
@@ -268,6 +288,7 @@ if __name__ == "__main__":
         use_rue=args.use_rue,
         use_farquhar=args.use_farquhar,
         results_dir=args.results_dir,
+        lr_scheduler_lambda=lr_scheduler_lambda,
     )
 
     # No longer mutating global WEATHER_FEATURES - using config.weather_features property instead
@@ -323,16 +344,18 @@ if __name__ == "__main__":
 
     # WandB logger for final model
     try:
+        wandb_project = args.wandb_project if args.wandb_project else "CYBENCH-LSTF-AAAI2027"
+        wandb_run_name = args.wandb_run_name if args.wandb_run_name else f"{args.model_type}-{args.crop}-{args.country}"
         wandb_logger = WandbLogger(
-            project="CYBENCH-LSTF-AAAI",
-            name=f"{args.model_type}-{args.crop}-{args.country}-final",
+            project=wandb_project,
+            name=wandb_run_name,
             config=vars(args),
             group=f"{args.crop}-{args.country}"
         )
         loggers = [wandb_logger]
     except Exception as e:
         print(f"[WandB Warning] Could not initialise WandB logger: {e}")
-        loggers = [CSVLogger("logs/", name="cybench-final")]
+        loggers = [CSVLogger("logs/", name="cybench-tst")]
 
     # Setup callbacks
     final_callbacks = [
@@ -344,7 +367,11 @@ if __name__ == "__main__":
             dirpath=args.save_checkpoint_dir,
             filename=f'{generate_checkpoint_name(args)}_{{epoch:02d}}_{{val_loss:.4f}}_runid:{run_id}',
         ),
+        LearningRateMonitor(logging_interval='epoch'),
     ]
+
+    if args.lr_decay_every is not None:
+        print(f"[LR Schedule] Enabled: LR will halve every {args.lr_decay_every} epochs")
 
     trainer = Trainer(
         max_epochs=config.max_epochs,

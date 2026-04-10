@@ -1,5 +1,6 @@
 import sys
 import logging
+import math
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, List, Tuple
 
@@ -210,6 +211,24 @@ class BaseTimeSeriesModel(ABC, pl.LightningModule):
             self.config.lag_years,
             self.config.use_heat_stress_days,
         )
+
+    def _init_temporal_attention(self, d_model: int) -> None:
+        """
+        Initialize temporal attention module with known d_model.
+
+        This method is called during _build_model() by models that support
+        attention-based pooling (e.g., TimeXer, iTransformer). The current
+        implementation uses a simpler pooling strategy, so this is a no-op
+        stub for compatibility with the reference implementation.
+
+        Args:
+            d_model: The hidden state dimension (e.g., 64 for most models)
+        """
+        # Stub for compatibility with reference implementation.
+        # TimeXer and iTransformer models use custom pooling strategies
+        # (channel projection, patch-based pooling) and don't need
+        # temporal attention pooling.
+        pass
 
     # -- Hidden state extraction and pooling helpers -------------------------
 
@@ -678,7 +697,6 @@ class BaseTimeSeriesModel(ABC, pl.LightningModule):
             mape = MeanAbsolutePercentageError()
 
             mse_val = mse(preds, targets)
-            r2_val = r2(preds, targets)
             mae_val = mae(preds, targets)
             mape_val = mape(preds, targets)
             rmse_val = torch.sqrt(mse_val)
@@ -687,6 +705,12 @@ class BaseTimeSeriesModel(ABC, pl.LightningModule):
             smape_val = torch.mean(2.0 * torch.abs(preds - targets) /
                                   (torch.abs(preds) + torch.abs(targets) + 1e-6))
             nrmse_val = rmse_val / (torch.mean(targets) + 1e-6)
+
+            # R² score requires at least 2 samples
+            if len(preds) >= 2:
+                r2_val = r2(preds, targets)
+            else:
+                r2_val = torch.tensor(float('nan'))  # Cannot compute R² with single sample
 
             # Store per-year metrics
             results[f'nrmse_{year}'] = nrmse_val.item()
@@ -712,7 +736,6 @@ class BaseTimeSeriesModel(ABC, pl.LightningModule):
             mape = MeanAbsolutePercentageError()
 
             mse_val = mse(all_preds_t, all_targets_t)
-            r2_val = r2(all_preds_t, all_targets_t)
             mae_val = mae(all_preds_t, all_targets_t)
             mape_val = mape(all_preds_t, all_targets_t)
             rmse_val = torch.sqrt(mse_val)
@@ -720,6 +743,12 @@ class BaseTimeSeriesModel(ABC, pl.LightningModule):
             smape_val = torch.mean(2.0 * torch.abs(all_preds_t - all_targets_t) /
                                   (torch.abs(all_preds_t) + torch.abs(all_targets_t) + 1e-6))
             nrmse_val = rmse_val / (torch.mean(all_targets_t) + 1e-6)
+
+            # R² score requires at least 2 samples
+            if len(all_preds_t) >= 2:
+                r2_val = r2(all_preds_t, all_targets_t)
+            else:
+                r2_val = torch.tensor(float('nan'))  # Cannot compute R² with single sample
 
             results['nrmse_overall'] = nrmse_val.item()
             results['mape_overall'] = mape_val.item()
@@ -981,8 +1010,14 @@ class BaseTimeSeriesModel(ABC, pl.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        return torch.optim.AdamW(self.parameters(), lr=self.lr,
-                                 weight_decay=self.weight_decay)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr,
+                                      weight_decay=self.weight_decay)
+        if self.config.lr_scheduler_lambda is not None:
+            scheduler = torch.optim.lr_scheduler.LambdaLR(
+                optimizer, lr_lambda=self.config.lr_scheduler_lambda
+            )
+            return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "interval": "epoch"}}
+        return optimizer
 
     def on_fit_start(self):
         """Log model size to wandb at the start of training."""
@@ -1139,7 +1174,9 @@ class AutoformerYieldModel(BaseTimeSeriesModel):
 
         # Step 4: Concatenate with static features and pass through regression head
         combined = torch.cat([pooled, x_static], dim=-1)
-        return self.regression_head(combined).squeeze(-1)
+        predictions = self.regression_head(combined).squeeze(-1)
+
+        return predictions
 
 
 class PatchTSTModel(BaseTimeSeriesModel):
@@ -1236,7 +1273,9 @@ class PatchTSTModel(BaseTimeSeriesModel):
 
         # Step 4: Concatenate with static features and pass through regression head
         combined = torch.cat([pooled, x_static], dim=-1)
-        return self.regression_head(combined).squeeze(-1)
+        predictions = self.regression_head(combined).squeeze(-1)
+
+        return predictions
 
 
 
@@ -1366,7 +1405,9 @@ class TSMixerModel(BaseTimeSeriesModel):
 
         # Step 4: Concatenate with static features and pass through regression head
         combined = torch.cat([pooled, x_static], dim=-1)
-        return self.regression_head(combined).squeeze(-1)
+        predictions = self.regression_head(combined).squeeze(-1)
+
+        return predictions
 
 class InformerModel(BaseTimeSeriesModel):
     """Informer: sparse attention transformer, efficient on long sequences."""
@@ -1447,7 +1488,9 @@ class InformerModel(BaseTimeSeriesModel):
 
         # Step 4: Concatenate with static features and pass through regression head
         combined = torch.cat([pooled, x_static], dim=-1)
-        return self.regression_head(combined).squeeze(-1)
+        predictions = self.regression_head(combined).squeeze(-1)
+
+        return predictions
 
 
 class TSTModel(BaseTimeSeriesModel):
@@ -1538,7 +1581,612 @@ class TSTModel(BaseTimeSeriesModel):
 
         # Step 4: Concatenate with static features and pass through regression head
         combined = torch.cat([pooled, x_static], dim=-1)
-        return self.regression_head(combined).squeeze(-1)
+        predictions = self.regression_head(combined).squeeze(-1)
+
+        return predictions
+
+
+# =========================================================
+# MODULE-LEVEL HELPER CLASSES FOR iTRANSFORMER AND TIMEXER
+# =========================================================
+# These classes are defined at module level to ensure proper pickling
+# for checkpoint saving/loading. Reference implementations from nixtla.
+
+class FullAttention(nn.Module):
+    """Scaled dot-product attention (nixtla implementation).
+
+    References:
+        - nixtla neuralforecast: https://github.com/Nixtla/neuralforecast
+    """
+    def __init__(self, scale=None, attention_dropout=0.1):
+        super().__init__()
+        self.scale = scale
+        self.dropout = nn.Dropout(attention_dropout)
+
+    def forward(self, queries, keys, values, attn_mask=None):
+        B, L, H, E = queries.shape
+        _, S, _, D = values.shape
+
+        q = queries.permute(0, 2, 1, 3)  # [B, H, L, E]
+        k = keys.permute(0, 2, 1, 3)
+        v = values.permute(0, 2, 1, 3)
+
+        scale = self.scale or 1.0 / math.sqrt(E)
+        attn_output = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=attn_mask,
+            dropout_p=self.dropout.p if self.training else 0.0,
+            scale=scale,
+        )
+        V = attn_output.permute(0, 2, 1, 3).contiguous()
+        return V, None
+
+
+class AttentionLayer(nn.Module):
+    """Multi-head attention layer wrapper (nixtla implementation).
+
+    References:
+        - nixtla neuralforecast: https://github.com/Nixtla/neuralforecast
+    """
+    def __init__(self, attention, hidden_size, n_heads, d_keys=None, d_values=None):
+        super().__init__()
+        d_keys = d_keys or (hidden_size // n_heads)
+        d_values = d_values or (hidden_size // n_heads)
+
+        self.inner_attention = attention
+        self.query_projection = nn.Linear(hidden_size, d_keys * n_heads)
+        self.key_projection = nn.Linear(hidden_size, d_keys * n_heads)
+        self.value_projection = nn.Linear(hidden_size, d_values * n_heads)
+        self.out_projection = nn.Linear(d_values * n_heads, hidden_size)
+        self.n_heads = n_heads
+
+    def forward(self, queries, keys, values, attn_mask=None):
+        B_q, L_q, _ = queries.shape
+        B_k, L_k, _ = keys.shape
+        B_v, L_v, _ = values.shape
+        H = self.n_heads
+
+        # Project and reshape each tensor with its OWN dimensions
+        queries = self.query_projection(queries).view(B_q, L_q, H, -1)
+        keys = self.key_projection(keys).view(B_k, L_k, H, -1)
+        values = self.value_projection(values).view(B_v, L_v, H, -1)
+
+        out, attn = self.inner_attention(queries, keys, values, attn_mask)
+        out = out.view(B_q, L_q, -1)
+        return self.out_projection(out), attn
+
+
+class TransEncoderLayer(nn.Module):
+    """Transformer encoder layer (nixtla implementation).
+
+    References:
+        - nixtla neuralforecast: https://github.com/Nixtla/neuralforecast
+    """
+    def __init__(self, attention, hidden_size, conv_hidden_size=None,
+                dropout=0.1, activation="gelu"):
+        super().__init__()
+        conv_hidden_size = conv_hidden_size or 4 * hidden_size
+        self.attention = attention
+        self.conv1 = nn.Conv1d(hidden_size, conv_hidden_size, kernel_size=1)
+        self.conv2 = nn.Conv1d(conv_hidden_size, hidden_size, kernel_size=1)
+        self.norm1 = nn.LayerNorm(hidden_size)
+        self.norm2 = nn.LayerNorm(hidden_size)
+        self.dropout = nn.Dropout(dropout)
+        self.activation = F.gelu if activation == "gelu" else F.relu
+
+    def forward(self, x, attn_mask=None):
+        new_x, attn = self.attention(x, x, x, attn_mask=attn_mask)
+        x = x + self.dropout(new_x)
+
+        y = x = self.norm1(x)
+        y = self.dropout(self.activation(self.conv1(y.transpose(-1, 1))))
+        y = self.dropout(self.conv2(y).transpose(-1, 1))
+
+        return self.norm2(x + y), attn
+
+
+class TransEncoder(nn.Module):
+    """Transformer encoder stack (nixtla implementation).
+
+    References:
+        - nixtla neuralforecast: https://github.com/Nixtla/neuralforecast
+    """
+    def __init__(self, attn_layers, norm_layer=None):
+        super().__init__()
+        self.attn_layers = nn.ModuleList(attn_layers)
+        self.norm = norm_layer
+
+    def forward(self, x, attn_mask=None):
+        attns = []
+        for attn_layer in self.attn_layers:
+            x, attn = attn_layer(x, attn_mask=attn_mask)
+            attns.append(attn)
+
+        if self.norm is not None:
+            x = self.norm(x)
+        return x, attns
+
+
+class PositionalEmbedding(nn.Module):
+    """Sinusoidal positional embedding (nixtla implementation).
+
+    References:
+        - nixtla neuralforecast: https://github.com/Nixtla/neuralforecast
+    """
+    def __init__(self, hidden_size, max_len=5000):
+        super().__init__()
+        pe = torch.zeros(max_len, hidden_size).float()
+        pe.require_grad = False
+
+        position = torch.arange(0, max_len).float().unsqueeze(1)
+        div_term = (torch.arange(0, hidden_size, 2).float() *
+                   -(math.log(10000.0) / hidden_size)).exp()
+
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+
+        pe = pe.unsqueeze(0)
+        self.register_buffer("pe", pe)
+
+    def forward(self, x):
+        return self.pe[:, :x.size(1)]
+
+
+class EncoderLayer(nn.Module):
+    """Encoder layer with self- and cross-attention (nixtla implementation).
+
+    References:
+        - nixtla neuralforecast: https://github.com/Nixtla/neuralforecast
+    """
+    def __init__(self, self_attention, cross_attention, d_model,
+                d_ff=None, dropout=0.1, activation="gelu"):
+        super().__init__()
+        d_ff = d_ff or 4 * d_model
+        self.self_attention = self_attention
+        self.cross_attention = cross_attention
+        self.conv1 = nn.Conv1d(d_model, d_ff, kernel_size=1)
+        self.conv2 = nn.Conv1d(d_ff, d_model, kernel_size=1)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.norm3 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.activation = F.gelu if activation == "gelu" else F.relu
+
+    def forward(self, x, cross, x_mask=None, cross_mask=None):
+        # Self-attention on endogenous patches
+        x = x + self.dropout(
+            self.self_attention(x, x, x, attn_mask=x_mask)[0]
+        )
+        x = self.norm1(x)
+
+        # Cross-attention: global tokens attend to exogenous channels
+        x_glb_ori = x[:, -1:, :]
+
+        # Cross-attention: query=[batch*C, 1, D], key/value=[batch*C, C, D]
+        x_glb_attn = self.dropout(
+            self.cross_attention(x_glb_ori, cross, cross, attn_mask=cross_mask)[0]
+        )
+        x_glb = x_glb_ori + x_glb_attn
+        x_glb = self.norm2(x_glb)
+
+        # Concatenate patches and updated global token
+        y = torch.cat([x[:, :-1, :], x_glb], dim=1)
+
+        # Feed-forward network
+        y = self.dropout(self.activation(self.conv1(y.transpose(-1, 1))))
+        y = self.dropout(self.conv2(y).transpose(-1, 1))
+
+        return self.norm3(x + y)
+
+
+class Encoder(nn.Module):
+    """Encoder stack (nixtla implementation).
+
+    References:
+        - nixtla neuralforecast: https://github.com/Nixtla/neuralforecast
+    """
+    def __init__(self, layers, norm_layer=None):
+        super().__init__()
+        self.layers = nn.ModuleList(layers)
+        self.norm = norm_layer
+
+    def forward(self, x, cross, x_mask=None, cross_mask=None):
+        for layer in self.layers:
+            x = layer(x, cross, x_mask=x_mask, cross_mask=cross_mask)
+
+        if self.norm is not None:
+            x = self.norm(x)
+        return x
+
+
+# =========================================================
+# iTRANSFORMER MODEL
+# =========================================================
+
+class iTransformerYieldModel(BaseTimeSeriesModel):
+    """
+    iTransformer: Inverted transformer for yield forecasting.
+
+    Key innovation from nixtla (Liu et al., 2023): treats each channel (weather variable)
+    as a token, not each timestep. This allows different variables to attend to each other,
+    capturing cross-variable dependencies critical for crop yield prediction.
+
+    Architectural adaptations for crop yield forecasting:
+    - Inverted embedding: [B, T, C] -> [B, C, hidden] via projection over time
+    - Instance normalization (RevIN) for per-series normalization
+    - Masked pooling to handle variable season lengths
+    - Static features concatenated after temporal processing
+    - Deeper regression head for scalar output
+
+    References:
+        - [Yong Liu, Tengge Hu, Haoran Zhang, et al. "iTransformer: Inverted
+           Transformers Are Effective for Time Series Forecasting"](https://arxiv.org/abs/2310.06625)
+        - nixtla implementation: https://github.com/Nixtla/neuralforecast
+    """
+
+    def _build_model(self) -> nn.Module:
+        hidden_size = 64
+        n_heads = 4
+        e_layers = 2
+        d_ff = 256
+        dropout = 0.1
+
+        seq_len = self.config.seq_len
+        n_channels = self.n_ts_features
+
+        logging.info(
+            f"[iTransformer BUILD] seq_len={seq_len}, n_channels={n_channels}, "
+            f"n_static={self.n_static_features}, hidden_size={hidden_size}, "
+            f"n_heads={n_heads}, e_layers={e_layers}"
+        )
+
+        # Inverted embedding: projects time dimension to hidden for each channel
+        # Input: [B, T, C] -> permute to [B, C, T] -> project T to hidden -> [B, C, hidden]
+        self.inverted_embedding = nn.Linear(seq_len, hidden_size)
+        self.embedding_dropout = nn.Dropout(dropout)
+
+        # Build encoder layers
+        self.encoder = TransEncoder(
+            [
+                TransEncoderLayer(
+                    AttentionLayer(
+                        FullAttention(scale=None, attention_dropout=dropout),
+                        hidden_size,
+                        n_heads,
+                    ),
+                    hidden_size,
+                    d_ff,
+                    dropout=dropout,
+                    activation="gelu",
+                )
+                for _ in range(e_layers)
+            ],
+            norm_layer=nn.LayerNorm(hidden_size),
+        )
+
+        # Initialize temporal attention
+        self._init_temporal_attention(hidden_size)
+
+        # Projection head: from hidden to scalar prediction per channel
+        # We'll pool across channels in forward()
+        self.channel_projection = nn.Linear(hidden_size, 1)
+
+        # Final regression head: combines pooled channel representations with static features
+        head_input_dim = n_channels + self.n_static_features
+        self.regression_head = nn.Linear(head_input_dim, 1)
+
+        logging.info(
+            f"[iTransformer BUILD] head_input_dim={head_input_dim} "
+            f"(n_channels={n_channels} + static={self.n_static_features})"
+        )
+
+        self._model_ready = True
+        return nn.Identity()
+
+    def forward(self, x_ts: torch.Tensor, x_static: torch.Tensor,
+                observed_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Forward pass for iTransformer.
+
+        Data flow:
+          1. Apply RevIN normalization (per-instance)
+          2. Inverted embedding: [B, T, C] -> [B, C, hidden]
+          3. Transformer encoder: channels attend to each other
+          4. Project each channel to scalar -> [B, C]
+          5. Masked pooling across channels (if needed)
+          6. Concatenate with static features -> scalar prediction
+        """
+        B, T, C = x_ts.shape
+
+        # Step 1: RevIN normalization
+        if self.config.use_revin:
+            x_ts = self._apply_revin_normalization(x_ts, observed_mask)
+        else:
+            x_ts = self._normalize_time_series(x_ts, observed_mask)
+
+        # Step 2: Inverted embedding (nixtla's key innovation)
+        # Permute from [B, T, C] to [B, C, T], then project T to hidden
+        x_ts_permuted = x_ts.permute(0, 2, 1)  # [B, C, T]
+        embedded = self.inverted_embedding(x_ts_permuted)  # [B, C, hidden]
+        embedded = self.embedding_dropout(embedded)
+
+        # Step 3: Transformer encoder (channels as tokens)
+        enc_out, _ = self.encoder(embedded, attn_mask=None)  # [B, C, hidden]
+
+        # Step 4: Project each channel to scalar representation
+        channel_scalars = self.channel_projection(enc_out).squeeze(-1)  # [B, C]
+
+        # Step 5: Masked pooling across channels
+        # Handle missing channels (all NaN for a given variable across time)
+        channel_validity = (~torch.isnan(x_ts).any(dim=1)).float()  # [B, C]
+        pooled_channels = channel_scalars * channel_validity  # Zero out invalid channels
+        pooled_channels = pooled_channels.sum(dim=-1) / channel_validity.sum(dim=-1).clamp(min=1)  # [B]
+
+        # Alternative: use mean of valid channels as representation
+        channel_mask = channel_validity.unsqueeze(-1)  # [B, C, 1]
+        valid_channel_repr = channel_scalars * channel_validity  # [B, C]
+        n_valid = channel_validity.sum(dim=-1, keepdim=True).clamp(min=1)  # [B, 1]
+        pooled_repr = (valid_channel_repr.sum(dim=-1) / n_valid.squeeze(-1))  # [B]
+
+        # Use all valid channels as features (not just mean)
+        # Fill invalid channels with mean of valid ones
+        filled_channels = channel_scalars.clone()
+        mean_per_sample = pooled_repr.unsqueeze(-1).expand(B, C)
+        filled_channels = torch.where(
+            channel_validity > 0.5,
+            filled_channels,
+            mean_per_sample
+        )  # [B, C]
+
+        # Step 6: Concatenate with static features and predict
+        combined = torch.cat([filled_channels, x_static], dim=-1)  # [B, C + n_static]
+        return self.regression_head(combined).squeeze(-1)  # [B]
+
+
+# =========================================================
+# TIMEXER MODEL
+# =========================================================
+
+class TimeXerYieldModel(BaseTimeSeriesModel):
+    """
+    TimeXer: Cross-attention transformer for yield forecasting with exogenous variables.
+
+    Key innovation from nixtla (Wang et al., 2024): combines endogenous patching
+    with cross-attention to exogenous channels. This allows the model to capture
+    both temporal patterns (via patching) and cross-variable interactions.
+
+    Architectural adaptations for crop yield forecasting:
+    - Endogenous: lag yields (broadcast over season) -> patched
+    - Exogenous: weather variables (inverted embedding, channels as tokens)
+    - Cross-attention: endogenous patches attend to exogenous channels
+    - Instance normalization (RevIN) for per-series normalization
+    - Masked pooling to handle variable season lengths
+    - Static features concatenated after temporal processing
+    - Deeper regression head for scalar output
+
+    References:
+        - [Yuxuan Wang, Haixu Wu, Jiaxiang Dong, et al. "TimeXer: Empowering
+           Transformers for Time Series Forecasting with Exogenous Variables"](https://arxiv.org/abs/2402.19072)
+        - nixtla implementation: https://github.com/Nixtla/neuralforecast
+    """
+
+    def _build_model(self) -> nn.Module:
+        hidden_size = 64
+        n_heads = 4
+        e_layers = 2
+        d_ff = 256
+        dropout = 0.1
+
+        seq_len = self.config.seq_len
+        n_channels = self.n_ts_features
+
+        # Store hidden_size as instance attribute for use in forward()
+        self.hidden_size = hidden_size
+
+        # Patching parameters
+        if self.config.aggregation == "daily":
+            self.patch_len = 16  # ~2 weeks
+        elif self.config.aggregation == "weekly":
+            self.patch_len = 4  # ~1 month
+        else:  # dekad
+            self.patch_len = 3  # ~1 month
+
+        self.patch_num = max(1, seq_len // self.patch_len)
+
+        logging.info(
+            f"[TimeXer BUILD] seq_len={seq_len}, patch_len={self.patch_len}, "
+            f"patch_num={self.patch_num}, n_channels={n_channels}, "
+            f"n_static={self.n_static_features}, hidden_size={hidden_size}, "
+            f"n_heads={n_heads}, e_layers={e_layers}"
+        )
+
+        # Endogenous embedding: patching with global token
+        # Lag yields will be treated as endogenous series
+        self.endo_patch_embedding = nn.Linear(self.patch_len, hidden_size, bias=False)
+        self.global_token = nn.Parameter(torch.randn(1, n_channels, 1, hidden_size))
+        self.positional_embedding = PositionalEmbedding(hidden_size)
+        self.endo_dropout = nn.Dropout(dropout)
+
+        # Exogenous embedding: inverted (channels as tokens)
+        self.exo_inverted_embedding = nn.Linear(seq_len, hidden_size)
+        self.exo_dropout = nn.Dropout(dropout)
+
+        # Encoder with self- and cross-attention
+        self.encoder = Encoder(
+            [
+                EncoderLayer(
+                    AttentionLayer(FullAttention(scale=None, attention_dropout=dropout),
+                                  hidden_size, n_heads),
+                    AttentionLayer(FullAttention(scale=None, attention_dropout=dropout),
+                                  hidden_size, n_heads),
+                    hidden_size,
+                    d_ff,
+                    dropout=dropout,
+                    activation="gelu",
+                )
+                for _ in range(e_layers)
+            ],
+            norm_layer=nn.LayerNorm(hidden_size),
+        )
+
+        # Initialize temporal attention
+        self._init_temporal_attention(hidden_size)
+
+        # Flatten and project head
+        # Input: [B, n_channels, (patch_num + 1), hidden_size]
+        # After permute: [B, n_channels, hidden_size, (patch_num + 1)]
+        # Flatten: [B, n_channels, hidden_size * (patch_num + 1)]
+        head_nf = hidden_size * (self.patch_num + 1)
+        self.flatten = nn.Flatten(start_dim=-2)
+        self.channel_projection = nn.Linear(head_nf, 1)
+        self.head_dropout = nn.Dropout(dropout)
+
+        # Final regression head: combines channel representations with static features
+        head_input_dim = n_channels + self.n_static_features
+        self.regression_head = nn.Linear(head_input_dim, 1)
+
+        logging.info(
+            f"[TimeXer BUILD] head_input_dim={head_input_dim} "
+            f"(n_channels={n_channels} + static={self.n_static_features}), "
+            f"head_nf={head_nf}"
+        )
+
+        self._model_ready = True
+        return nn.Identity()
+
+    def forward(self, x_ts: torch.Tensor, x_static: torch.Tensor,
+                observed_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Forward pass for TimeXer.
+
+        Data flow:
+          1. Apply RevIN normalization
+          2. Endogenous: lag yields (broadcast) -> patch + global token
+          3. Exogenous: weather variables -> inverted embedding
+          4. Encoder: self-attention on patches, cross-attention to exogenous
+          5. Project each channel's patches to scalar
+          6. Concatenate with static features -> scalar prediction
+        """
+        B, T, C = x_ts.shape
+
+        # Step 1: RevIN normalization
+        if self.config.use_revin:
+            x_ts = self._apply_revin_normalization(x_ts, observed_mask)
+        else:
+            x_ts = self._normalize_time_series(x_ts, observed_mask)
+
+        # Step 2: Build endogenous series from lag yields
+        # This creates a constant series (broadcast scalar) for patching
+        endo = self._build_endogenous_series_lag(x_static, x_ts, observed_mask)  # [B, T, 1]
+
+        # Step 3: Endogenous patching (nixtla's approach)
+        # unfold: [B, T, 1] -> [B, 1, patch_num, patch_len]
+        endo_patched = endo.unfold(dimension=1, size=self.patch_len, step=self.patch_len)
+        endo_patched = endo_patched.squeeze(2)  # [B, patch_num, patch_len]
+
+        # If T not perfectly divisible, pad
+        if endo_patched.shape[1] < self.patch_num:
+            pad_len = self.patch_num - endo_patched.shape[1]
+            endo_patched = F.pad(endo_patched, (0, 0, 0, pad_len))
+
+        # Expand to n_channels: [B, patch_num, patch_len] -> [B, n_channels, patch_num, patch_len]
+        endo_patched = endo_patched.unsqueeze(1).expand(B, C, -1, -1)
+
+        # Reshape for embedding: [B * C, patch_num, patch_len]
+        endo_reshaped = endo_patched.reshape(B * C, -1, self.patch_len)
+
+        # Project patches: [B*C, patch_num, patch_len] -> [B*C, patch_num, hidden_size]
+        endo_patches = self.endo_patch_embedding(endo_reshaped)
+
+        # Add positional encoding
+        endo_patches = endo_patches + self.positional_embedding(endo_patches)
+
+        # Reshape back: [B, C, patch_num, hidden_size]
+        endo_patches = endo_patches.reshape(B, C, self.patch_num, self.hidden_size)
+        hidden_size = self.hidden_size
+
+        # Add global token: [B, C, 1, hidden_size]
+        glb_token = self.global_token.repeat(B, 1, 1, 1)
+
+        # Concatenate patches and global token: [B, C, (patch_num + 1), hidden_size]
+        endo_with_glb = torch.cat([endo_patches, glb_token], dim=2)
+
+        # Reshape for encoder: [B*C, (patch_num + 1), hidden_size]
+        endo_embed = endo_with_glb.reshape(B * C, -1, hidden_size)
+        endo_embed = self.endo_dropout(endo_embed)
+
+        # Step 4: Exogenous inverted embedding (nixtla's approach)
+        # Permute [B, T, C] to [B, C, T], project T to hidden
+        x_ts_permuted = x_ts.permute(0, 2, 1)  # [B, C, T]
+        exo_embed = self.exo_inverted_embedding(x_ts_permuted)  # [B, C, hidden_size]
+        exo_embed = self.exo_dropout(exo_embed)
+
+        # Expand exo to match endo batch dimension for cross-attention
+        # exo_embed: [B, C, hidden] -> expand to [B*C, 1, hidden]
+        # Each endogenous channel attends to all exogenous channels
+        exo_expanded = exo_embed.unsqueeze(1).expand(B, C, -1, -1)  # [B, C, C, hidden]
+        exo_expanded = exo_expanded.reshape(B * C, C, hidden_size)  # [B*C, C, hidden]
+
+        # Step 5: Encoder with self- and cross-attention
+        enc_out = self.encoder(endo_embed, exo_expanded)  # [B*C, (patch_num+1), hidden]
+
+        # Step 6: Reshape and project per channel
+        enc_out = enc_out.reshape(B, C, -1, self.hidden_size)  # [B, C, (patch_num+1), hidden]
+
+        # Flatten and project each channel
+        enc_out = enc_out.permute(0, 1, 3, 2)  # [B, C, hidden, (patch_num+1)]
+        flat = self.flatten(enc_out)  # [B, C, hidden*(patch_num+1)]
+        channel_repr = self.channel_projection(flat).squeeze(-1)  # [B, C]
+        channel_repr = self.head_dropout(channel_repr)
+
+        # Step 7: Handle missing channels
+        channel_validity = (~torch.isnan(x_ts).any(dim=1)).float()  # [B, C]
+        valid_channel_repr = channel_repr * channel_validity  # [B, C]
+        n_valid = channel_validity.sum(dim=-1, keepdim=True).clamp(min=1)  # [B, 1]
+        pooled_repr = (valid_channel_repr.sum(dim=-1) / n_valid.squeeze(-1))  # [B]
+
+        # Fill invalid channels with mean of valid ones
+        filled_channels = channel_repr.clone()
+        mean_per_sample = pooled_repr.unsqueeze(-1).expand(B, C)
+        filled_channels = torch.where(
+            channel_validity > 0.5,
+            filled_channels,
+            mean_per_sample
+        )  # [B, C]
+
+        # Step 8: Concatenate with static features and predict
+        combined = torch.cat([filled_channels, x_static], dim=-1)  # [B, C + n_static]
+        return self.regression_head(combined).squeeze(-1)  # [B]
+
+    def _build_endogenous_series_lag(
+        self,
+        x_static: torch.Tensor,
+        x_ts: torch.Tensor,
+        observed_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Build endogenous series from lag yields (constant over time)."""
+        B, T, C = x_ts.shape
+
+        if self.config.lag_years > 0:
+            static_names = self._get_static_feature_names()
+            lag_indices = [
+                i for i, name in enumerate(static_names)
+                if name.startswith('lag_yield_')
+            ]
+
+            if lag_indices:
+                # Most recent lag: broadcast scalar over time
+                lag_val = x_static[:, lag_indices[0]:lag_indices[0] + 1]  # [B, 1]
+                endo = lag_val.unsqueeze(1).expand(B, T, 1)  # [B, T, 1]
+
+                if observed_mask is not None:
+                    endo = endo * observed_mask.unsqueeze(-1).float()
+
+                return endo
+
+        # Fallback: mean of exogenous channels
+        endo = x_ts.mean(dim=-1, keepdim=True)
+        return endo
+
 
 def create_model(config: TSTModelConfig) -> BaseTimeSeriesModel:
     model_map = {
@@ -1546,6 +2194,8 @@ def create_model(config: TSTModelConfig) -> BaseTimeSeriesModel:
         "patchtst": PatchTSTModel,
         "informer": InformerModel,
         "tst": TSTModel,
+        "itransformer": iTransformerYieldModel,
+        "timexer": TimeXerYieldModel,
     }
     # Only register TSMixer if import succeeded
     if TimeSeriesMixerForPrediction is not None:

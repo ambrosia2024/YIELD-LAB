@@ -142,7 +142,7 @@ import torch
 
 from lightning.pytorch import Trainer
 from lightning.pytorch.loggers import WandbLogger, CSVLogger
-from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
 
 # CY-BENCH Dependencies
 from cybench.datasets.configured import load_dfs_crop
@@ -228,6 +228,12 @@ if __name__ == "__main__":
                         help='Drop tavg feature')
     parser.add_argument('--use_revIN', action='store_true',
                         help='Use RevIN normalization for XLinear endogenous series')
+    parser.add_argument('--lr_decay_every', type=int, default=None,
+                        help='Decay learning rate by half every N epochs (default: None, no decay)')
+    parser.add_argument('--wandb_project', default=None,
+                        help='Custom WandB project name (default: CYBENCH-LSTF-AAAI2027-new)')
+    parser.add_argument('--wandb_run_name', default=None,
+                        help='Custom WandB run name (default: model_type-crop-country)')
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -251,6 +257,14 @@ if __name__ == "__main__":
           f"batch={args.batch_size}  seed={args.seed}")
     print(f"{'=' * 70}\n")
 
+    # Create LR scheduler lambda if requested
+    lr_scheduler_lambda = None
+    if args.lr_decay_every is not None:
+        def lr_scheduler_lambda(epoch):
+            decay_factor = args.lr_decay_every
+            decay_steps = epoch // decay_factor
+            return 0.5 ** decay_steps
+
     config = LinearModelConfig(
         crop=args.crop, country=args.country,
         model_type=args.model_type, aggregation=args.aggregation,
@@ -272,6 +286,7 @@ if __name__ == "__main__":
         drop_tavg=args.drop_tavg,
         use_revIN=args.use_revIN,
         results_dir=args.results_dir,
+        lr_scheduler_lambda=lr_scheduler_lambda,
     )
 
     print(f"[Feature Config] Weather features: {config.weather_features}")
@@ -333,16 +348,18 @@ if __name__ == "__main__":
 
     # WandB logger for final model
     try:
+        wandb_project = args.wandb_project if args.wandb_project else "CYBENCH-LSTF-AAAI2027-new"
+        wandb_run_name = args.wandb_run_name if args.wandb_run_name else f"{args.model_type}-{args.crop}-{args.country}"
         wandb_logger = WandbLogger(
-            project="CYBENCH-LSTF-AAAI",
-            name=f"{args.model_type}-{args.crop}-{args.country}-final",
+            project=wandb_project,
+            name=wandb_run_name,
             config=vars(args),
             group=f"{args.crop}-{args.country}"
         )
         loggers = [wandb_logger]
     except Exception as e:
         print(f"[WandB Warning] Could not initialise WandB logger: {e}")
-        loggers = [CSVLogger("logs/", name="cybench-final")]
+        loggers = [CSVLogger("logs/", name="cybench-linear")]
 
     # Setup callbacks
     final_callbacks = [
@@ -354,7 +371,11 @@ if __name__ == "__main__":
             dirpath=args.save_checkpoint_dir,
             filename=f'{generate_checkpoint_name(args)}_{{epoch:02d}}_{{val_loss:.4f}}_runid:{run_id}',
         ),
+        LearningRateMonitor(logging_interval='epoch'),
     ]
+
+    if args.lr_decay_every is not None:
+        print(f"[LR Schedule] Enabled: LR will halve every {args.lr_decay_every} epochs")
 
     trainer = Trainer(
         max_epochs=config.max_epochs,

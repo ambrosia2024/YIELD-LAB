@@ -1,4 +1,4 @@
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Callable
 
 from dataclasses import dataclass
 
@@ -51,9 +51,13 @@ class TSTModelConfig:
     use_gdd: bool = False # GDD time series channel
     use_heat_stress_days: bool = False  # Heat stress static counts
     use_rue: bool = False           # RUE index time series channel
-    use_farquhar: bool = False      # Farquhar proxy time series channel 
+    use_farquhar: bool = False      # Farquhar proxy time series channel
+    # Normalization strategy
+    use_revin: bool = False         # Use RevIN (per-instance) normalization vs global z-score
     # Results directory for CSV output
     results_dir: str = "checkpoints/results"
+    # Optional learning rate scheduler (lambda function for epoch-based decay)
+    lr_scheduler_lambda: Optional[Callable] = None
 
     @property
     def seq_len(self):
@@ -132,9 +136,11 @@ class LinearModelConfig:
     use_gdd: bool = False # GDD time series channel
     use_heat_stress_days: bool = False  # Heat stress static counts
     use_rue: bool = False # RUE index time series channel
-    use_farquhar: bool = False # Farquhar proxy time series channel 
+    use_farquhar: bool = False # Farquhar proxy time series channel
     # Results directory for CSV output
     results_dir: str = "checkpoints/results"
+    # Optional learning rate scheduler (lambda function for epoch-based decay)
+    lr_scheduler_lambda: Optional[Callable] = None
 
     @property
     def seq_len(self):
